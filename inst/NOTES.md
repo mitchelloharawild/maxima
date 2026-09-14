@@ -492,16 +492,24 @@ MSYS-vs-Windows-native path mismatch already hit for
 this script is an MSYS-style path (plain `pwd`), which a probe
 running through native Windows file I/O may simply not resolve.
 
-Fixed by setting `ECLDIR` explicitly (rather than relying on
+Tried setting `ECLDIR` explicitly (rather than relying on
 self-location) to a Windows-native form of `$ECL_PREFIX` (`pwd -W`,
 same fix as `true_srcdir`) around Maxima's own `configure`/`make`/`make
 install` -- inherited by the `ecl.exe` subprocesses those spawn either
 directly or via Maxima's Makefile, since environment variables flow
-down through both Make and shell. Not independently confirmed that
-`cl_probe_file()` failing on the MSYS-style path is the *exact*
-mechanism (no way to attach a debugger in CI), only that explicitly
-setting `ECLDIR` to a form that's already been confirmed to matter
-elsewhere on this exact host fixes the symptom.
+down through both Make and shell. **Confirmed by a real Windows CI run
+not to fix it**: identical error, now hit five times instead of three.
+So either `ECLDIR` didn't reach those subprocesses the way expected,
+or the `cl_probe_file()`/self-location theory above is simply wrong.
+Rather than keep guessing blind, `configure.win` now runs a temporary
+diagnostic `ecl.exe -eval ...` invocation right before Maxima's build,
+printing `(ext:getenv "ECLDIR")`, `(si::get-library-pathname)`, a
+`probe-file` on it, the live `"SYS"` pathname-translations, a
+`probe-file` on `"SYS:cmp.fas"` directly, `*default-pathname-defaults*`,
+`*modules*`, and which `C`-package external symbols contain "FASL" --
+straight to the same install log this whole investigation has been
+reading. Remove once this is actually root-caused; until then, treat
+everything above as an unconfirmed hypothesis, not the fix.
 
 ## Relocatability
 

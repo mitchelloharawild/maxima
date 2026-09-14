@@ -485,6 +485,24 @@ else
   # resolves regardless of whether the self-location path above works.
   ECL_PREFIX_NATIVE=$(cd "$ECL_PREFIX" && pwd -W)
 
+  # TEMPORARY DIAGNOSTIC (see inst/NOTES.md, "ecl.exe can't find its
+  # own cmp module"): setting ECLDIR to a Windows-native path alone
+  # didn't fix the symptom on a real Windows CI run, so print the
+  # actual facts instead of continuing to guess blind. Remove once
+  # this is root-caused.
+  log "diagnosing ECL library pathname resolution"
+  ECLDIR="$ECL_PREFIX_NATIVE" "$ECL_BIN" -norc \
+    -eval '(format t "~&DIAG ECLDIR env: ~S~%" (ext:getenv "ECLDIR"))' \
+    -eval '(format t "~&DIAG library-pathname: ~S~%" (si::get-library-pathname))' \
+    -eval '(format t "~&DIAG probe library-pathname: ~S~%" (probe-file (si::get-library-pathname)))' \
+    -eval '(format t "~&DIAG SYS: translations: ~S~%" (si::pathname-translations "SYS"))' \
+    -eval '(format t "~&DIAG probe SYS:cmp.fas: ~S~%" (probe-file "SYS:cmp.fas"))' \
+    -eval '(format t "~&DIAG *default-pathname-defaults*: ~S~%" *default-pathname-defaults*)' \
+    -eval '(format t "~&DIAG *modules*: ~S~%" *modules*)' \
+    -eval '(format t "~&DIAG do-symbols C: ~S~%" (loop for s being the external-symbols of (find-package "C") when (search "FASL" (string s)) collect s))' \
+    -eval '(quit)' \
+    < /dev/null 2>&1 || true
+
   log "configuring Maxima against the vendored ECL"
   (
     cd "$SRC_DIR/maxima-$MAXIMA_VERSION"
