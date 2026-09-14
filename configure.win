@@ -269,6 +269,14 @@ else
     # instead -- the same "both --build and --host" fix already applied
     # for Apple Silicon in ./configure, and for the same underlying
     # reason (GMP assembly assumptions that don't hold for this host).
+    # ABI=longlong (rather than leaving $ABI unset, which lets GMP try
+    # "long" first and succeed) picks the "long long"-limbed option of
+    # that abilist explicitly: `long` is also only 32 bits on Windows, so
+    # leaving GMP to pick it left both `long` and `mp_limb_t` narrower
+    # than ECL's own 64-bit `cl_fixnum` -- confirmed by a third real CI
+    # run to trip ECL's own big.d build-time assertion, "#error ECL
+    # cannot build with GMP when both long and mp_limb_t are smaller than
+    # cl_fixnum". `long long` stays 64 bits under LLP64, satisfying it.
     # ECL 21.2.1 hardcodes --host=${host_alias} for GMP's nested
     # ./configure invocation; the second and third sed commands below add
     # the same gmp_host indirection ./configure's Apple-Silicon patch
@@ -283,7 +291,7 @@ else
 a\
                 if test "x$host_cpu" = "xx86_64"; then\
                   # maxima-r-mingw-gmp-c-fallback: see configure.win\
-                  gmp_build=none-w64-mingw32; gmp_host=none-w64-mingw32\
+                  gmp_build=none-w64-mingw32; gmp_host=none-w64-mingw32; ABI=longlong\
                 fi
 }
 /^  if test -z "\$gmp_build"; then$/{

@@ -295,6 +295,21 @@ dies (see the "Show install log on failure" CI step, added because
 otherwise -- R CMD check captures `configure`/`configure.win`'s entire
 transcript into `00install.out` but never prints it).
 
+That "none" `abilist` offers two limb choices, `long` and `longlong`,
+and leaving `$ABI` unset (as the Apple Silicon arm64 patch effectively
+does too, via its own `ABI=32` -> `"long"` normalization) lets GMP try
+`long` first and succeed there, since GMP itself doesn't care which one
+it gets. That's *not* good enough here, though: `long` is also only 32
+bits under Windows' LLP64 model, so a plain `long`-limbed GMP leaves
+both `long` and `mp_limb_t` narrower than ECL's own 64-bit `cl_fixnum`
+-- confirmed by a third real Windows CI run (the GMP configure/build
+itself now succeeds) to trip ECL's own build-time assertion in
+`src/c/big.d`: `#error "ECL cannot build with GMP when both long and
+mp_limb_t are smaller than cl_fixnum"`. Fixed by explicitly setting
+`ABI=longlong` for the `mingw*`/x86_64 case, forcing GMP's `long
+long`-limbed option instead (64 bits under LLP64 too, unlike `long`),
+satisfying that assertion.
+
 ## Windows: `bool` is a keyword under C23 (ECL's own `dpp.c`)
 
 Next run past the GMP fix above (GMP itself built and installed
