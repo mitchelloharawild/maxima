@@ -429,11 +429,26 @@ exist. Fixed by pointing all of them at `$ECL_PREFIX` directly for the
 vendored case (kept as the hierarchical `bin`/`lib` paths for a system
 ECL via `ecl-config`, e.g. from `pacman -S mingw-w64-x86_64-ecl`, which
 *does* follow the normal MSYS2 package layout); the Lisp-support-copy
-and libecl-DLL-search sites already tolerated either layout gracefully
-once `ECL_LIBDIR` itself was fixed, except the support-copy's `find
-... -name 'ecl-*'` had to gain a `${x:-$ECL_LIBDIR}`-style fallback, to
-avoid silently becoming `cp -R /. ...` when that pattern matches
-nothing under a flat install.
+site tolerated either layout once `ECL_LIBDIR` itself was fixed, given
+a `${x:-$ECL_LIBDIR}`-style fallback on its `find ... -name 'ecl-*'`
+match, to avoid silently becoming `cp -R /. ...` when that pattern
+matches nothing under a flat install.
+
+## Windows: the vendored build's runtime DLL is "ecl.dll", not "libecl*.dll"
+
+Next run past the flatinstall-layout fix (furthest yet: ECL *and*
+Maxima both fully built and installed): died on this script's own
+defensive check, `ERROR: no libecl runtime DLL (libecl*.dll) found
+under .../ecl/bin or .../ecl`. Confirmed from the same install log:
+the vendored build's actual installed file is plainly named `ecl.dll`
+(see its own link command, `... -o .../build/bin/ecl.exe ... ecl.dll
+...`, and the flatinstall file listing, which shows an `ecl.dll`
+sitting right next to the copied-in headers) -- no `lib` prefix at
+all, unlike the libtool-driven `lib<name>.dll` naming a system ECL from
+an MSYS2 package (`pacman -S mingw-w64-x86_64-ecl`) would actually
+have. Fixed by also trying an `ecl*.dll` pattern against `$ECL_LIBDIR`,
+alongside the existing `libecl*.dll` ones (kept, for that system-ECL
+case).
 
 ## Relocatability
 

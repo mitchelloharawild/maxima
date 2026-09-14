@@ -492,19 +492,23 @@ rm -f "$PKG_ROOT"/src/libecl*.dll
 # inst/libs/ the way ./configure does on Unix.
 #
 # A normal (hierarchical) install puts the runtime DLL in <prefix>/bin/
-# (checked first, e.g. for a system ECL); flatinstall (hardcoded for
+# (checked first, e.g. for a system ECL -- MSYS2 packages do follow
+# libtool's usual "lib<name>.dll" naming); flatinstall (hardcoded for
 # mingw*, see the ECL_BIN comment above and inst/NOTES.md) drops it
-# directly in $ECL_PREFIX == $ECL_LIBDIR instead, covered by the second
-# pattern.
+# directly in $ECL_PREFIX == $ECL_LIBDIR instead, *without* a "lib"
+# prefix -- confirmed by a real Windows CI run, the vendored build's
+# installed file is plainly named "ecl.dll" (see its link command:
+# `... -o .../build/bin/ecl.exe ... ecl.dll ...`), not "libecl*.dll".
+# Both patterns are tried against $ECL_LIBDIR for exactly that reason.
 copied_libecl=false
-for f in "$ECL_PREFIX"/bin/libecl*.dll "$ECL_LIBDIR"/libecl*.dll; do
+for f in "$ECL_PREFIX"/bin/libecl*.dll "$ECL_LIBDIR"/libecl*.dll "$ECL_LIBDIR"/ecl*.dll; do
   if [ -e "$f" ]; then
     cp "$f" "$PKG_ROOT/src/"
     copied_libecl=true
   fi
 done
 if [ "$copied_libecl" != "true" ]; then
-  log "ERROR: no libecl runtime DLL (libecl*.dll) found under"
+  log "ERROR: no ECL runtime DLL (libecl*.dll / ecl*.dll) found under"
   log "  $ECL_PREFIX/bin or $ECL_LIBDIR"
   exit 1
 fi
