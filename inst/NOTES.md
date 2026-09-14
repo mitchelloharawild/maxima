@@ -509,8 +509,36 @@ component. `pwd -W` never adds a trailing slash, so the bare
 entirely. The self-location path doesn't have this problem because it
 explicitly rebuilds its result through `cl_make_pathname` with
 `:name`/`:type` `nil` -- forcing a proper directory pathname -- before
-handing it back; a bare `ECLDIR` string skips that. Fixed with a
-trailing slash on the value handed to `ECLDIR`.
+handing it back; a bare `ECLDIR` string skips that. The trailing slash
+*is* correct and needed -- but turned out not to be the whole story
+either: confirmed by a **second** real Windows CI run, reproducing the
+exact failing context (same `cwd`, same `ECLDIR`-prefixed invocation)
+with a second diagnostic probe: with the trailing slash, `(require
+'cmp)` genuinely succeeds there, loading `SYS:cmp.fas` and making
+`c:build-fasl` `fboundp` -- and yet the *actual* Maxima build, moments
+later in the exact same directory with the exact same `ECLDIR`, still
+failed identically.
+
+The difference: our diagnostic explicitly called `(require 'cmp)`
+first. None of Maxima's own build invocations do -- every one of them
+(embedded directly in `src/Makefile.in`, e.g. `(load
+"../lisp-utils/defsystem.lisp") ... (funcall (intern
+"CREATE-DEPENDENCY-FILE" :mk) ...)`) eventually loads `maxima.system`,
+whose `#+ecl (defun do-compile-ecl ... (c:build-fasl ...))` just
+assumes `cmp` is already loaded/resident by the time it's *read* --
+`#+ecl` still has to read the following form to skip past it correctly
+even were the feature test to fail, which it doesn't here, so reading
+`c:build-fasl` happens unconditionally regardless. That assumption
+evidently holds on Unix (this exact `maxima.system`, unpatched, loads
+fine there) but not on this Windows build; not run further to ground
+*why* `cmp` ends up already resident by this point on Unix and not
+here (a `cmp`-preloaded default build vs. a lazily-autoloaded one,
+maybe, or something upstream relies on that differs by platform) --
+the fix holds regardless of that mechanism. Fixed by patching
+`lisp-utils/defsystem.lisp` -- the one file already `(load ...)`-ed
+first, unconditionally, by every one of these invocations -- to
+`(require 'cmp)` at the very top, rather than touching Maxima's own
+Makefile-embedded Lisp forms directly.
 
 ## Relocatability
 

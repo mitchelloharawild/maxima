@@ -490,27 +490,35 @@ else
   # directory-pathname invariant the self-location path gets for free.
   ECL_PREFIX_NATIVE=$(cd "$ECL_PREFIX" && pwd -W)/
 
-  # TEMPORARY DIAGNOSTIC ROUND 2 (see inst/NOTES.md): the trailing
-  # slash above, confirmed correct by round 1's diagnostic in
-  # isolation, still didn't fix the real build on a real Windows CI
-  # run -- identical error. Reproducing the exact failing context this
-  # time (same cwd Maxima's own build uses, same ECLDIR-prefixed
-  # invocation style) instead of guessing why. Remove once root-caused.
-  log "diagnosing ECL library pathname resolution (round 2, in Maxima's src/)"
-  (
-    cd "$SRC_DIR/maxima-$MAXIMA_VERSION/src"
-    ECLDIR="$ECL_PREFIX_NATIVE" "$ECL_BIN" -norc \
-      -eval '(format t "~&DIAG2 ECLDIR env: ~S~%" (ext:getenv "ECLDIR"))' \
-      -eval '(format t "~&DIAG2 library-pathname: ~S~%" (si::get-library-pathname))' \
-      -eval '(format t "~&DIAG2 SYS: translations: ~S~%" (si::pathname-translations "SYS"))' \
-      -eval '(format t "~&DIAG2 probe SYS:cmp.fas: ~S~%" (probe-file "SYS:cmp.fas"))' \
-      -eval '(format t "~&DIAG2 default-pathname-defaults: ~S~%" *default-pathname-defaults*)' \
-      -eval '(require (quote cmp))' \
-      -eval '(format t "~&DIAG2 after require cmp, modules: ~S~%" *modules*)' \
-      -eval '(format t "~&DIAG2 fboundp c:build-fasl: ~S~%" (fboundp (quote c:build-fasl)))' \
-      -eval '(quit)' \
-      < /dev/null 2>&1 || true
-  )
+  # Confirmed by a second real Windows CI run, this time reproducing
+  # the exact failing context (same cwd, same ECLDIR): the trailing
+  # slash above is correct and sufficient -- an explicit (require
+  # 'cmp) there successfully loads cmp via SYS:cmp.fas and c:build-fasl
+  # becomes fboundp. But every one of Maxima's own build invocations
+  # (embedded in src/Makefile.in, e.g. `(load
+  # "../lisp-utils/defsystem.lisp") ... (funcall (intern
+  # "CREATE-DEPENDENCY-FILE" :mk) ...)`, eventually loading
+  # maxima.system) never calls (require 'cmp) itself -- maxima.system's
+  # own `#+ecl (defun do-compile-ecl ... (c:build-fasl ...))` just
+  # assumes cmp is already loaded/resident by the time it's *read*
+  # (`#+ecl` still has to read the form to skip past it correctly, even
+  # were the feature test to fail, which it doesn't -- so reading
+  # `c:build-fasl` happens unconditionally). That assumption evidently
+  # holds on Unix (this exact maxima.system loads fine there) but not
+  # here; not run further to ground why cmp ends up already resident
+  # by this point on Unix and not on Windows, since the fix is the same
+  # regardless: make sure it's required before maxima.system can be
+  # loaded, on any platform. Patches lisp-utils/defsystem.lisp -- the
+  # one file already `(load ...)`-ed first, unconditionally, by every
+  # one of these invocations -- to (require 'cmp) at the very top,
+  # rather than touching Maxima's own Makefile-embedded Lisp forms.
+  DEFSYSTEM_LISP="$SRC_DIR/maxima-$MAXIMA_VERSION/lisp-utils/defsystem.lisp"
+  if ! grep -q 'maxima-r-mingw-require-cmp' "$DEFSYSTEM_LISP"; then
+    log "patching lisp-utils/defsystem.lisp to require cmp up front"
+    printf '%s\n' "#+ecl (require 'cmp) ; maxima-r-mingw-require-cmp: see configure.win" \
+      | cat - "$DEFSYSTEM_LISP" > "$DEFSYSTEM_LISP.tmp"
+    mv "$DEFSYSTEM_LISP.tmp" "$DEFSYSTEM_LISP"
+  fi
 
   log "configuring Maxima against the vendored ECL"
   (
