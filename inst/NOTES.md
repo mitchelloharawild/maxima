@@ -167,6 +167,115 @@ likely each is to be the actual problem:
   applicable (or necessary -- the underlying re-armed-trap issue may not
   reproduce the same way) is unconfirmed.
 
+First real run, on GitHub Actions' `windows-latest`/Rtools45 (gcc 14):
+died in the vendored GMP's own configure, before reaching any of the
+above -- every ABI it tried (64, then 32) failed its "long long
+reliability" conftest with a plain compile error, because that conftest
+defines several helper functions K&R-style with no return type
+(`f(){...}`, `h(){}`, `g(){}`), and gcc 14 now hard-errors on that
+(`-Wimplicit-int`) by default, the same class of tightened-default
+problem as `-Wimplicit-function-declaration` above it -- confirmed by
+reproducing the exact conftest against gcc 14 in isolation (gcc 13 only
+warns). Fixed by adding `-Wno-error=implicit-int` alongside the existing
+`-Wno-error=implicit-function-declaration` in both `configure.win`'s and
+`./configure`'s CFLAGS. None of the porting concerns listed above have
+been exercised yet -- the build never got past GMP to reach Maxima's own
+configure/build.
+
+Second run: died even earlier, at GMP's "checking for suitable m4" --
+Rtools45's MSYS2 toolchain doesn't ship m4. Fixed in the workflow (not
+`configure.win`): an "Install m4" step runs Rtools' own `pacman -Sy m4`
+before the check step.
+
+## macOS (Apple Silicon) build
+
+ECL 21.2.1's configure predates Apple Silicon (see the Apple-Silicon GMP
+patch in `./configure`'s comments, which routes around the specific
+symptom this caused for GMP). The underlying cause is more general: on
+arm64 Darwin, `uname -p` -- what ECL's (and libffi's, and Boehm-GC's)
+bundled `config.guess` uses for the host triple's CPU field -- reports
+"arm" regardless of bit width (only `uname -m` says "arm64"), and
+`config.guess` has no Darwin-specific case to correct this the way it
+already does for Intel Macs (`i386` -> `x86_64` when actually 64-bit).
+So the host triple comes out "arm-apple-darwin*", not
+"aarch64-apple-darwin*".
+
+GMP's own nested `./configure` invocation avoids this entirely -- see
+the patch in `./configure` -- by matching on `` `uname -m` `` directly
+and forcing a generic, assembly-free build rather than trusting the host
+triple at all. libffi's nested `./configure` invocation had no such
+protection: `configure.host`'s architecture dispatch matches the host
+triple literally, and "arm-apple-darwin*" hits its generic 32-bit ARM
+case (`arm*-*-*`), not AArch64's (`aarch64*-*-*`) -- silently building
+`src/arm/*.S` instead of `src/aarch64/*.S`. That surfaced first-run, on
+GitHub Actions' `macos-latest` (arm64), as a final link error building
+ECL itself: `ffi_call`/`ffi_prep_cif_machdep`/etc. undefined for
+architecture arm64. Fixed the same way as the GMP case conceptually, but
+narrower in practice: `./configure` now overrides just this one nested
+`--build`/`--host` with a correctly-canonicalized `aarch64-apple-darwin*`
+triple on arm64 Darwin, rather than passing `--build`/`--host` to ECL's
+top-level configure (which would also reach GMP's nested configure and
+defeat its own deliberate non-cross-compiling "none" build).
+
+Boehm-GC's nested configure has this same host-triple exposure
+(untouched by either fix above) but built successfully as-is in that
+same run, so it wasn't touched -- presumably falling back to a portable
+path for an unrecognized arch, the same way GMP's own fallback would if
+its dedicated patch weren't there. Worth another look if a future
+ECL/Boehm-GC version bump changes that.
+
+Next run past the above: died compiling libffi's `src/aarch64/sysv.S`,
+with `as` rejecting its CFI directives as "invalid CFI advance_loc
+expression" -- a known libffi/LLVM 17+ incompatibility
+([libffi#852](https://github.com/libffi/libffi/issues/852)). libffi's
+own CFI-support probe (`GCC_AS_CFI_PSEUDO_OP` in `asmcfi.m4`) only
+tries a trivial case that still passes, so it wrongly enables CFI.
+Fixed in `./configure`: on arm64 Darwin, pre-set that probe's cache
+variable to `no` before running ECL's `./configure`, so CFI directives
+are dropped entirely (only affects unwind info, not `ffi_call`
+correctness).
+
+Next run past the above (GMP/libffi/ECL/Maxima all built cleanly, ~7min):
+died compiling this package's own `src/convert.cpp`, not anything
+vendored: `-std=gnu++20 ... error: ISO C++17 does not allow 'register'
+storage class specifier`, from ECL's own public headers
+(`ecl/external.h`, `ecl/stacks.h`) declaring a few functions with the
+pre-C++17 `register` keyword. `src/Makevars` already set `CXX_STD =
+CXX11`, but R printed "specified C++11" and compiled with clang's
+*default* `-std=gnu++20` anyway -- CXX_STD alone isn't a reliable way to
+pin the dialect on this R/toolchain combination. This didn't show up on
+Linux because GCC only warns about `register` even in C++17/20 mode;
+only Clang hard-errors on it. Fixed by also setting `PKG_CXXFLAGS =
+-std=gnu++14` directly in both `configure`'s and `configure.win`'s
+generated Makevars (not relied on CXX_STD alone); C++14 keeps `register`
+merely deprecated everywhere while still meeting cpp11's C++11 floor.
+
+## Windows: GMP too old for Win64 calling conventions (mingw*, not just cygwin*)
+
+First real Windows run past the GMP/m4 issues above (see "Windows build"
+below): died in GMP's own configure, `checking size of mp_limb_t... 4`
+then `configure: error: Oops, mp_limb_t is 32 bits, but the assembler
+code in this configuration expects 64 bits`. Root cause is in ECL's own
+`src/configure`, not this package's: for the `cygwin*` host case it
+already sets `with_c_gmp=yes` when `host_cpu` is `x86_64` (with the
+comment "Our GMP library is too old and does not support Windows64
+calling conventions"), which routes the vendored GMP into its portable,
+assembly-free "none" build instead of real x86_64 assembly. The `mingw*`
+case right below it never got the same treatment, even though it hits
+exactly the same problem: with `ABI=64` forced, GMP assumes `mp_limb_t`
+is `unsigned long`, but mingw-w64's LLP64 data model makes that 32 bits
+(`long` stays 32-bit on Windows even in 64-bit builds) while the x86_64
+assembly ABI=64 selects expects a 64-bit limb. Fixed the same way as the
+Apple Silicon GMP/libffi cases above: `configure.win` patches ECL's
+`src/configure` to add the same `with_c_gmp=yes` for x86_64 under
+`mingw*` that already exists for `cygwin*`.
+
+Confirmed via a real Windows CI run that this is genuinely where it
+dies (see the "Show install log on failure" CI step, added because
+`check-r-package` gave zero diagnosable output on an install failure
+otherwise -- R CMD check captures `configure`/`configure.win`'s entire
+transcript into `00install.out` but never prints it).
+
 ## Relocatability
 
 Both ECL and Maxima bake in the `--prefix` path they were built with, and
