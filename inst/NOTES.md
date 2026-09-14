@@ -354,6 +354,50 @@ GCC-14-hardened diagnostic family per upstream's release notes, not yet
 individually confirmed to be hit) rather than spending another CI
 round-trip finding it separately if it is.
 
+## Windows: `true_srcdir`/`true_builddir` pick the wrong (POSIX) path style
+
+Next run past the `-Wint-conversion` fix (furthest yet: ECL's own `.d`
+sources all compiled, `ecl_min.exe` itself built and *ran* -- "Lisp
+core booted", bootstrapping bare.lsp): died loading `lsp/load.lsp` --
+`FILE-ERROR ... (:PATHNAME #P"SRC:LSP;EXPORT.LSP.NEWEST")`. `bare.lsp`
+(generated from `bare.lsp.in` by `config.status`) sets up ECL's `SRC:`/
+`SYS:`/etc. logical-pathname hosts against `@true_srcdir@`/
+`@true_builddir@`, substituted at configure time by this snippet in
+ECL's own `configure`:
+
+```sh
+if uname -a | grep -i 'mingw' > /dev/null; then
+  true_srcdir=`(cd ${srcdir}; pwd -W)`   # Windows-native, e.g. "D:/a/..."
+  true_builddir=`pwd -W`
+else
+  true_srcdir=`(cd ${srcdir}; pwd)`      # POSIX/MSYS, e.g. "/d/a/..."
+  true_builddir=`pwd`
+fi
+```
+
+-- keyed on `uname -a` containing "mingw", *not* on `$host` (which is
+reliably `x86_64-w64-mingw32` here, since `configure.win` passes
+`--host` explicitly). That's the wrong signal for how this package
+actually runs `configure`: R CMD INSTALL invokes it under Rtools'
+*base* MSYS2 bash (`C:\rtools45\usr\bin\bash.EXE`, not
+`mingw64\bin\bash`), whose own `uname -a` doesn't contain "mingw" even
+though `--host`/`--build` both say `mingw32` -- so it took the POSIX
+branch regardless, baking an MSYS-style `/d/a/...` path into
+`bare.lsp`. `ecl_min.exe` is a native Windows binary, though (built by
+a real mingw-w64 cross toolchain targeting `x86_64-w64-mingw32`) -- it
+can't resolve an MSYS-style path through its own (mingw CRT) file I/O,
+so the very first thing `bare.lsp` loads through the `SRC:` translation
+it just set up, `lsp/load.lsp`, fails outright, unresolved. This is
+exactly the drive-letter-vs-`/x/`-path porting risk flagged as the top
+concern under "Windows build" above, just in a different spot (ECL's
+own bootstrap path setup) than initially guessed (Maxima's own
+`./configure`/build).
+
+Fixed by patching this condition to *also* accept `$host` saying
+`mingw`, independent of what `uname -a` reports -- `configure.win`'s
+patch changes the check to
+`uname -a | grep -i 'mingw' > /dev/null || echo "$host" | grep -qi 'mingw'`.
+
 ## Relocatability
 
 Both ECL and Maxima bake in the `--prefix` path they were built with, and

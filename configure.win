@@ -311,6 +311,43 @@ SED_EOF
       fi
     fi
 
+    # ECL's configure decides whether to use Windows-native paths
+    # (`pwd -W`, giving e.g. "D:/a/...") or POSIX ones (plain `pwd`,
+    # giving e.g. "/d/a/...") for `true_srcdir`/`true_builddir` -- baked
+    # verbatim into bare.lsp as the physical target of the "SRC:"/"SYS:"
+    # logical-pathname hosts ECL's own Lisp sources load through -- by
+    # grepping `uname -a` for "mingw", not by checking $host (which is
+    # reliably "x86_64-w64-mingw32" here, since configure.win passes
+    # --host explicitly). That's the wrong signal in exactly this
+    # package's build: R CMD INSTALL runs this under Rtools' base MSYS2
+    # bash (see the shell this whole script runs under), whose own
+    # `uname -a` doesn't contain "mingw" even though --host/--build both
+    # say mingw32 -- so it takes the POSIX-path branch regardless.
+    # Confirmed by a fourth real Windows CI run (GMP/ECL-bootstrap fixes
+    # above all worked -- this is the furthest yet, deep into building
+    # ecl_min.exe itself) that this is genuinely the failure: ecl_min.exe
+    # is a native Windows binary, and can't resolve an MSYS-style
+    # "/d/a/..." path via its own (mingw CRT) file I/O, so bare.lsp's
+    # first `(load "lsp/load.lsp" ...)` -- itself relying on the "SRC:"
+    # translation set up two lines above it -- fails outright:
+    # `FILE-ERROR ... (:PATHNAME #P"SRC:LSP;EXPORT.LSP.NEWEST")`.
+    # Patched to also take the Windows-native-path branch whenever $host
+    # itself says mingw, independent of what uname reports.
+    if ! grep -q 'maxima-r-mingw-true-srcdir-fallback' "$ECL_CONFIGURE_SRC"; then
+      log "patching ECL's configure for mingw-w64 true_srcdir/true_builddir"
+      sed -f - "$ECL_CONFIGURE_SRC" > "$ECL_CONFIGURE_SRC.tmp" <<'SED_EOF'
+/uname -a | grep -i 'mingw' > \/dev\/null; then/c\
+if uname -a | grep -i 'mingw' > /dev/null || echo "$host" | grep -qi 'mingw'; then # maxima-r-mingw-true-srcdir-fallback: see configure.win
+SED_EOF
+      chmod +x "$ECL_CONFIGURE_SRC.tmp"
+      mv "$ECL_CONFIGURE_SRC.tmp" "$ECL_CONFIGURE_SRC"
+      if ! grep -q 'maxima-r-mingw-true-srcdir-fallback' "$ECL_CONFIGURE_SRC"; then
+        log "ERROR: failed to patch ECL's configure for mingw-w64 true_srcdir/true_builddir"
+        log "  (ECL_VERSION may have changed the code this patch targets)"
+        exit 1
+      fi
+    fi
+
     log "configuring ECL for mingw-w64 (this vendors GMP, Boehm-GC and"
     log "  libffi -- no system Lisp, bignum, GC or FFI library is required)"
     (
