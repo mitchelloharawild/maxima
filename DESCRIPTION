@@ -1,0 +1,37 @@
+Package: maxima
+Title: Embed the 'Maxima' Computer Algebra System via 'ECL'
+Version: 0.0.0.9000
+Authors@R: c(
+    person("Mitchell", "O'Hara-Wild", , "mail@mitchelloharawild.com", role = c("aut", "cre")),
+    person("Maxima developers", role = c("ctb", "cph"),
+           comment = "Maxima computer algebra system, vendored and compiled at install time; see inst/COPYRIGHTS"),
+    person("ECL developers", role = c("ctb", "cph"),
+           comment = "ECL (Embeddable Common Lisp) runtime, vendored and compiled at install time; see inst/COPYRIGHTS")
+    )
+Description: Embeds the 'Maxima' computer algebra system directly into R
+    by linking a vendored, compiled 'ECL' (Embeddable Common Lisp) runtime
+    with a vendored, compiled 'Maxima' core, avoiding any subprocess or
+    text-protocol overhead. Calls into 'Maxima' are ordinary in-process
+    function calls. Provides a thin, generic mechanism for calling any
+    'Maxima' function from R and converting between R language objects and
+    'Maxima' expressions, without imposing a curated high-level API.
+License: GPL-2
+Copyright: file inst/COPYRIGHTS
+Encoding: UTF-8
+Language: en
+Roxygen: list(markdown = TRUE)
+Imports:
+    tools
+Suggests:
+    callr,
+    testthat (>= 3.0.0)
+Config/testthat/edition: 3
+LinkingTo:
+    cpp11
+SystemRequirements: A C/C++ toolchain (e.g. Rtools on Windows, Xcode
+    Command Line Tools on macOS, build-essential on Debian/Ubuntu).
+    No system ECL or Maxima installation is required: this package
+    vendors and compiles both (and ECL's own bundled GMP, Boehm-GC and
+    libffi) from source at install time. See tools/versions.sh for the
+    exact pinned versions. GNU make, C99.
+Config/roxygen2/version: 8.1.0

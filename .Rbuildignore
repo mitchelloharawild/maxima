@@ -1,0 +1,12 @@
+^LICENSE\.md$
+^README\.Rmd$
+^tools/build$
+^tools/downloads$
+^inst/libs$
+^inst/ecl-support$
+^inst/maxima-core$
+^src/Makevars$
+^src/Makevars\.win$
+^_dev$
+^\.github$
+^cran-comments\.md$
