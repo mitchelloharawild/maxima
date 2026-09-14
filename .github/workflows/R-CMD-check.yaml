@@ -83,3 +83,20 @@ jobs:
           # fail the build either until someone checks the output.
           error-on: '"error"'
           build_args: 'c("--no-manual", "--no-build-vignettes")'
+
+      - name: Show install log on failure
+        # configure/configure.win write their whole transcript (including
+        # every nested GMP/Boehm-GC/libffi/ECL/Maxima configure and make
+        # invocation -- none of it is redirected elsewhere) to R's own
+        # 00install.out, but check-r-package never prints that file, only
+        # testthat's. Without this, an install failure here shows nothing
+        # but "ERROR" in the job log.
+        if: failure()
+        shell: bash
+        run: |
+          echo "::group::00install.out"
+          find check -name '00install.out' -exec cat '{}' \; || true
+          echo "::endgroup::"
+          echo "::group::00check.log"
+          find check -name '00check.log' -exec cat '{}' \; || true
+          echo "::endgroup::"
