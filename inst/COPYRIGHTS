@@ -1,0 +1,185 @@
+Copyright and license notices for the maxima R package
+=======================================================
+
+This file enumerates the copyright holders and licenses of all software
+that ends up in an installed copy of this R package. Only the first
+component below (the R package itself) is distributed in this package's
+CRAN source tarball. Every other component listed here is downloaded
+from its own upstream project, verified against a pinned checksum,
+compiled from source, and staged into this package's installed tree by
+this package's `configure` script at install time (see `configure` and
+`tools/versions.sh` for the exact pinned versions, source URLs and
+checksums). None of that upstream source code is redistributed inside
+the CRAN source tarball itself.
+
+1. This R package ("maxima")
+-----------------------------
+Copyright (C) Mitchell O'Hara-Wild.
+License: GPL-2 (see the top-level LICENSE.md / LICENSE file).
+
+2. Maxima
+---------
+Version vendored: 5.46.0 (pinned in tools/versions.sh)
+Upstream: https://maxima.sourceforge.io/
+Copyright: The Maxima developers (Maxima descends from DOE-MACSYMA;
+  William F. Schelter obtained permission in 1998 to redistribute it
+  under the terms of the GNU General Public License).
+License: GNU General Public License, version 2 (GPL-2), as confirmed by
+  the COPYING file shipped with the Maxima 5.46.0 source distribution.
+  Maxima's project page (https://maxima.sourceforge.io/) likewise states
+  that source code was released "under the GNU General Public License
+  (GPL)".
+Downloaded, compiled, and staged into this package's installed tree
+  (under inst/maxima-core) by `configure` at install time; not included
+  in the CRAN source tarball.
+
+3. ECL (Embeddable Common Lisp)
+--------------------------------
+Version vendored: 21.2.1 (pinned in tools/versions.sh)
+Upstream: https://ecl.common-lisp.dev/ (development hosted at
+  https://gitlab.com/embeddable-common-lisp/ecl)
+Copyright: The ECL developers (originally ECLS/ECL-Spain and ECoLisp).
+License: GNU Lesser General Public License. Note on the exact version:
+  the COPYING file actually shipped inside the ecl-21.2.1.tar.gz source
+  tarball vendored by this package (also present locally in a built
+  copy of this package at inst/ecl-support/COPYING) is verbatim the
+  "GNU LIBRARY GENERAL PUBLIC LICENSE, Version 2, June 1991" (the
+  original, pre-2.1 "Library GPL" text) -- it is NOT the plain/ordinary
+  GPL. Separately, the ECL project's current website and GitLab project
+  metadata describe the project's license as "LGPL-2.1+", stating that
+  the license was changed from GPL-2.0 to LGPL-2.1+ by Prof. Juanjo
+  Garcia-Ripoll (with the agreement of Prof. Giuseppe Attardi) after the
+  ECLS and ECoLisp branches were reunited, i.e. before Daniel
+  Kochmanski's maintainership beginning in 2015. It is unclear whether
+  this discrepancy reflects the COPYING file simply not having been
+  refreshed to the newer LGPL 2.1 boilerplate text after that
+  relicensing announcement, or something more specific to the 21.2.1
+  release; a maintainer wishing to pin this down further should check
+  ECL's git history for the COPYING file and the license headers of
+  individual ECL source files. In either case the license is a form of
+  the LGPL (version 2 per the literal shipped COPYING text of this
+  pinned version, or version 2.1-or-later per the upstream project's own
+  current self-description), which is GPL-2-compatible either way.
+Downloaded, compiled, and staged into this package's installed tree
+  (under inst/ecl-support and inst/libs) by `configure` at install
+  time; not included in the CRAN source tarball. Staged as libecl.so*
+  (or libecl*.dylib on macOS), a genuine shared library linked at
+  runtime rather than statically into this package's own compiled code
+  -- see the comment above that copy step in `configure` -- which is
+  what keeps embedding this LGPL-licensed library comfortable from a
+  GPL-2 R package. Preserve that if the build ever changes; do not
+  switch to a static link without revisiting this.
+
+4. GMP (GNU Multiple Precision Arithmetic Library)
+---------------------------------------------------
+Vendored transitively: built and statically included by ECL itself
+  (configure invokes ECL's own `./configure --enable-gmp=included`,
+  i.e. this package never fetches GMP directly -- ECL's own build does).
+Upstream: https://gmplib.org/
+Copyright: The GMP development team / Free Software Foundation.
+License: Since GMP 6, dual-licensed: GNU Lesser General Public License
+  version 3 (or later), or, at the recipient's option, the GNU General
+  Public License version 2 (or later). (Ancillary demonstration/test
+  programs shipped with GMP itself, not part of the library proper, are
+  GPLv3-or-later only.) See https://gmplib.org/manual/Copying for the
+  authoritative statement. This package does not pin GMP's own version
+  independently -- it is whatever version ECL 21.2.1's own vendored copy
+  bundles -- so the exact GMP point release could not be confirmed from
+  this package's own configuration.
+Downloaded, compiled, and staged into this package's installed tree as
+  part of ECL's own build, by `configure` at install time; not included
+  in the CRAN source tarball.
+
+5. Boehm-Demers-Weiser garbage collector ("Boehm-GC" / "bdwgc")
+-----------------------------------------------------------------
+Vendored transitively: built and statically included by ECL itself
+  (configure invokes ECL's own `./configure --enable-boehm=included`).
+Upstream: https://github.com/bdwgc/bdwgc
+Copyright: Hans-J. Boehm, Alan J. Demers, Xerox Corporation, Silicon
+  Graphics, Hewlett-Packard, and other contributors (copyright is
+  spread across many individual source files).
+License: A permissive, MIT-style license (not the verbatim standard MIT
+  License text) -- see the project's LICENSE file, which grants
+  permission to use, copy, modify and distribute the software provided
+  the copyright notices are retained, with no warranty, and notes that a
+  small number of files carry their own similar-but-not-identical
+  permissive terms.
+Downloaded, compiled, and staged into this package's installed tree as
+  part of ECL's own build, by `configure` at install time; not included
+  in the CRAN source tarball.
+
+6. libffi
+---------
+Vendored transitively: built and statically included by ECL itself
+  (configure invokes ECL's own `./configure --with-dffi=included`).
+Upstream: https://github.com/libffi/libffi
+Copyright: Anthony Green, Red Hat, Inc., and others.
+License: MIT License.
+Downloaded, compiled, and staged into this package's installed tree as
+  part of ECL's own build, by `configure` at install time; not included
+  in the CRAN source tarball.
+
+Note on Maxima's own bundled sub-packages
+------------------------------------------
+Maxima's own upstream source tree bundles a number of further
+sub-packages under `share/`, `interfaces/`, and elsewhere, some of which
+carry licenses distinct from the plain GPL-2 at the root of the Maxima
+source tree. This was previously only spot-checked for `share/logic`;
+it has since been swept more broadly by (1) downloading and
+checksum-verifying the pinned maxima-5.46.0.tar.gz (against the same
+MAXIMA_SHA256 `configure`/`tools/versions.sh` pin), (2) finding every
+COPYING/LICENSE-named file anywhere under `share/` and `interfaces/`,
+and (3) grepping the same two trees for common non-GPL license markers
+("Redistribution and use", "public domain", "MIT License", "BSD
+License", etc.) to catch files that assert a different license inline
+without a standalone COPYING file. This is still not a literal
+per-file audit of every one of the thousands of files in those trees
+(see the `share/contrib` note below), but it is a real, repeatable
+sweep rather than a single spot-check, and it surfaced the following:
+
+* `share/logic/COPYING`, `interfaces/emacs/imaxima/COPYING`, and
+  `interfaces/xmaxima/Tkmaxima/COPYING.tcl` are all, on inspection, the
+  plain GNU General Public License, version 2 -- the same license as
+  the rest of Maxima (just without the Maxima-specific
+  dedication/export-control preamble that precedes the license text in
+  Maxima's own top-level COPYING file), so none of these are actually a
+  *different* license in practice.
+* Maxima's own top-level `LICENSES/` directory already documents one
+  genuine exception itself: `LICENSES/getopt-license.txt` states that
+  `lisp-utils/getopt.lisp` (Copyright (C) 2003 Kevin M. Rosenberg) is
+  under a 3-clause-BSD-style license, not GPL-2.
+* `share/minpack/disclaimer` states that the MINPACK numerical routines
+  under `share/minpack` (translated from Fortran, Copyright (C) 1999
+  University of Chicago, as operator of Argonne National Laboratory)
+  carry their own permissive, 3-clause-BSD-style license, not GPL-2.
+  The other bundled/translated Fortran numerical libraries alongside it
+  under `share/` (`lapack`, `lbfgs`, `odepack`, `hompack`, `cobyla`,
+  `colnew`, `fftpack5`) are likewise derived from third-party numerical
+  code (LAPACK, ODEPACK, HOMPACK, COBYLA, COLNEW and FFTPACK5
+  respectively) that upstream is not GPL-2 either (typically permissive
+  or public-domain), but unlike `share/minpack` none of them ship an
+  equivalent disclaimer/license file of their own inside Maxima's
+  source tree recording that.
+* `interfaces/xmaxima/ObjTcl/Object.tcl` (Copyright (C) 1994 Lawrence
+  Berkeley Laboratory) carries its own permissive BSD-style license
+  (with an advertising clause) inline, distinct from GPL-2.
+* `share/contrib/Eulix/Eulix.html` states that one file (a stylesheet)
+  is placed in the public domain, and `share/contrib/mcclim/README`
+  states that one file within it (`formula.lisp`, by Andy Hefner) is
+  public domain.
+* `share/contrib` itself (81 entries at this version) is a large,
+  heterogeneously-authored grab-bag of individually-contributed
+  packages, of which the two just above are the only ones this sweep's
+  grep matched -- but given its size and provenance it is the single
+  most likely place for further undisclosed license variance, and
+  wasn't checked file-by-file below the directory level.
+
+None of this changes the license terms this package itself redistributes
+Maxima under (Maxima's own top-level COPYING, GPL-2, is still what this
+package's own build treats as covering the combined work, matching how
+Maxima itself ships) -- every exception found above is more permissive
+than GPL-2 (BSD-style or public domain), which is fine to include in a
+GPL-2 work, not a conflict with it. The point of recording them here is
+so they're a known, named list instead of an open-ended "might be
+something in there" -- and so a future version bump re-runs the same
+three-step sweep above rather than assuming nothing changed.

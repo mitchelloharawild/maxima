@@ -1,0 +1,412 @@
+#!/bin/sh
+# Configure script for the maxima R package, run by R CMD INSTALL on
+# Windows (in place of ./configure) via the sh bundled with Rtools.
+#
+# WARNING TO MAINTAINERS: this script has not been exercised on a real
+# Windows machine (it was written on Linux, with no Windows/Rtools/MSYS2
+# environment available to build and iterate against). It mirrors
+# ./configure's structure and reasoning as closely as Windows allows, but
+# every Windows-specific decision below -- most importantly, where the
+# built libecl DLL ends up and how it's found at runtime -- needs to be
+# checked against a real build the first time this actually runs. See the
+# "Windows build (configure.win)" section of inst/NOTES.md for a list of
+# the specific things most likely to need fixing, and update that section
+# (rather than just silently patching around a problem here) once any of
+# this has been verified or corrected against a real build.
+#
+# Structurally this follows ./configure exactly: same four stages (system
+# ECL fast path, build ECL, build Maxima against it, stage the vendored
+# runtime under inst/), same pinned versions from tools/versions.sh, same
+# MAXIMA_R_OFFLINE/MAXIMA_R_REBUILD/MAXIMA_R_FORCE_VENDOR env vars. See
+# ./configure's own comments for the rationale behind each stage; this
+# file only comments on where and why Windows differs. It is a separate,
+# self-contained script (rather than one sourced by ./configure) because
+# R never runs both on the same platform, and keeping the divergent parts
+# -- Stage 3's runtime-library handling and Stage 4's Makevars.win -- in
+# one place per platform is easier to follow than threading `case` branches
+# through a single shared script for logic that is otherwise identical.
+#
+# Three Windows differences drive most of what's different below:
+#
+#   1. No rpath. ELF's $ORIGIN (what ./configure's Stage 4 uses so the
+#      package's compiled object finds libecl next to itself, wherever R
+#      installs the package) has no Windows equivalent. Windows instead
+#      searches the directory of the *loading* module first, so the fix
+#      is to get libecl's DLL into the same directory R ultimately installs
+#      this package's own compiled DLL into. The documented way to do that
+#      (see "Writing R Extensions" on configure.win, and how e.g. the
+#      `units`/`magick` packages ship an extra runtime DLL on Windows) is
+#      to drop it into src/ before `make` runs: R's own Windows install
+#      step sweeps every *.dll left in src/ into libs/<arch>/ alongside
+#      the package's own, which is exactly the same directory Windows will
+#      search first when loading it. Stage 3 below does that instead of
+#      copying into inst/libs/ the way ./configure does for Linux/macOS.
+#   2. Different toolchain layout. Rtools' MSYS2/mingw-w64 build of ECL
+#      installs the actual libecl-*.dll into <prefix>/bin/ (mingw/libtool
+#      convention: runtime DLLs in bin/, the .dll.a import library used
+#      only at link time in lib/), not <prefix>/lib/ where ./configure
+#      finds libecl.so*/libecl*.dylib on Unix. Stage 3 looks in bin/ first.
+#   3. .exe/.dll naming and paths use backslashes once outside the MSYS
+#      shell, but everything here stays inside MSYS-provided tools (cp,
+#      tar, ecl-config's own shell script, ...), which accept the same
+#      forward-slash paths as Unix; no path translation is done here on
+#      the assumption that's unnecessary. If Maxima's own ./configure or
+#      build chokes on that assumption, that's the next thing to check.
+
+set -e
+
+unset CC CFLAGS CPPFLAGS CXX CXXFLAGS LDFLAGS LIBS MAKEFLAGS
+
+PKG_ROOT=$(pwd)
+. "$PKG_ROOT/tools/versions.sh"
+
+TOOLS_DIR="$PKG_ROOT/tools"
+DL_DIR="$TOOLS_DIR/downloads"
+BUILD_DIR="$TOOLS_DIR/build"
+SRC_DIR="$BUILD_DIR/src"
+ECL_PREFIX="$BUILD_DIR/ecl"
+MAXIMA_PREFIX="$BUILD_DIR/maxima"
+STAMP_DIR="$BUILD_DIR/stamps"
+
+INST_ECL_SUPPORT_DIR="$PKG_ROOT/inst/ecl-support"
+INST_MAXIMA_CORE_DIR="$PKG_ROOT/inst/maxima-core"
+
+mkdir -p "$DL_DIR" "$BUILD_DIR" "$STAMP_DIR"
+
+log() { echo "*** maxima (configure.win): $*"; }
+
+ncpus() {
+  # Rtools' sh always has NUMBER_OF_PROCESSORS in its environment
+  # (inherited from Windows itself); nproc/sysctl are checked first only
+  # for parity with ./configure in case this ever runs in some other
+  # MSYS2-alike that doesn't set it.
+  if command -v nproc >/dev/null 2>&1; then nproc
+  elif [ -n "${NUMBER_OF_PROCESSORS:-}" ]; then echo "$NUMBER_OF_PROCESSORS"
+  else echo 2
+  fi
+}
+
+sha256_check() {
+  file="$1"; expected="$2"
+  if command -v sha256sum >/dev/null 2>&1; then
+    actual=$(sha256sum "$file" | cut -d' ' -f1)
+  elif command -v shasum >/dev/null 2>&1; then
+    actual=$(shasum -a 256 "$file" | cut -d' ' -f1)
+  else
+    log "WARNING: no sha256sum/shasum found, skipping checksum verification of $file"
+    return 0
+  fi
+  if [ "$actual" != "$expected" ]; then
+    log "ERROR: checksum mismatch for $file"
+    log "  expected: $expected"
+    log "  actual:   $actual"
+    exit 1
+  fi
+}
+
+fetch() {
+  url="$1"; dest="$2"
+  if [ -f "$dest" ]; then
+    log "using cached download: $dest"
+    return 0
+  fi
+  if [ "${MAXIMA_R_OFFLINE:-false}" = "true" ]; then
+    log "ERROR: MAXIMA_R_OFFLINE=true but $dest is not present."
+    log "  Download it yourself from: $url"
+    exit 1
+  fi
+  log "downloading $url"
+  if command -v curl >/dev/null 2>&1; then
+    if ! curl -fL --retry 3 -o "$dest.part" "$url"; then
+      log "ERROR: failed to download $url"
+      rm -f "$dest.part"
+      exit 1
+    fi
+  elif command -v wget >/dev/null 2>&1; then
+    if ! wget -O "$dest.part" "$url"; then
+      log "ERROR: failed to download $url"
+      rm -f "$dest.part"
+      exit 1
+    fi
+  else
+    log "ERROR: need curl or wget to download $url"
+    exit 1
+  fi
+  mv "$dest.part" "$dest"
+}
+
+need_cmd() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    log "ERROR: required build tool '$1' not found."
+    exit 1
+  fi
+}
+
+version_ge() {
+  awk -v a="$1" -v b="$2" '
+    BEGIN {
+      na = split(a, va, ".");
+      nb = split(b, vb, ".");
+      n = (na > nb) ? na : nb;
+      for (i = 1; i <= n; i++) {
+        x = (i <= na) ? va[i] + 0 : 0;
+        y = (i <= nb) ? vb[i] + 0 : 0;
+        if (x > y) { print "ge"; exit }
+        if (x < y) { print "lt"; exit }
+      }
+      print "ge";
+    }
+  '
+}
+
+ecl_config_prefix() {
+  incdir=""
+  for tok in $("$1" --cflags 2>/dev/null); do
+    case "$tok" in
+      -I*) incdir=${tok#-I}; break ;;
+    esac
+  done
+  case "$incdir" in
+    */include) echo "${incdir%/include}" ;;
+    *) echo "$incdir" ;;
+  esac
+}
+
+ecl_config_libdir() {
+  libdir=""
+  for tok in $("$1" --libs 2>/dev/null); do
+    case "$tok" in
+      -L*) libdir=${tok#-L}; break ;;
+    esac
+  done
+  echo "$libdir"
+}
+
+# A C/C++ toolchain here means Rtools' mingw-w64 gcc/g++, expected already
+# on PATH by the time R runs configure.win (that's how Rtools wires itself
+# into R CMD INSTALL). We only sanity-check it's reachable, same as
+# ./configure does for cc/gcc.
+if ! command -v gcc >/dev/null 2>&1 && ! command -v cc >/dev/null 2>&1; then
+  log "ERROR: no C compiler (gcc/cc) found on PATH. Install Rtools"
+  log "  (https://cran.r-project.org/bin/windows/Rtools/) and make sure"
+  log "  its bin/ directories are on PATH, then reinstall this package."
+  exit 1
+fi
+need_cmd make
+need_cmd tar
+
+REBUILD="${MAXIMA_R_REBUILD:-false}"
+
+# --- Stage 0: detect a usable system ECL --------------------------------
+# Same idea and same compatibility rule as ./configure's Stage 0 -- see
+# its comments. Included here mainly for symmetry (e.g. an MSYS2 install
+# with ECL added via `pacman -S mingw-w64-x86_64-ecl`) even though in
+# practice most Windows installs will fall through to Stage 1.
+USE_SYSTEM_ECL=false
+if [ "${MAXIMA_R_FORCE_VENDOR:-false}" != "true" ] \
+   && command -v ecl-config >/dev/null 2>&1 && command -v ecl >/dev/null 2>&1; then
+  SYS_ECL_VERSION=$(ecl --version 2>/dev/null | sed -n 's/^ECL[ 	]*\([0-9][0-9.]*\).*/\1/p')
+  if [ -n "$SYS_ECL_VERSION" ]; then
+    SYS_ECL_MAJOR=$(echo "$SYS_ECL_VERSION" | cut -d. -f1)
+    PINNED_ECL_MAJOR=$(echo "$ECL_VERSION" | cut -d. -f1)
+    if [ "$SYS_ECL_MAJOR" = "$PINNED_ECL_MAJOR" ] \
+       && [ "$(version_ge "$SYS_ECL_VERSION" "$ECL_VERSION")" = "ge" ]; then
+      SYS_ECL_CONFIG=$(command -v ecl-config)
+      SYS_ECL_PREFIX=$(ecl_config_prefix "$SYS_ECL_CONFIG")
+      SYS_ECL_LIBDIR=$(ecl_config_libdir "$SYS_ECL_CONFIG")
+      if [ -n "$SYS_ECL_PREFIX" ] \
+         && { [ -x "$SYS_ECL_PREFIX/bin/ecl.exe" ] || [ -x "$SYS_ECL_PREFIX/bin/ecl" ]; } \
+         && [ -n "$SYS_ECL_LIBDIR" ] && [ -d "$SYS_ECL_LIBDIR" ]; then
+        USE_SYSTEM_ECL=true
+        if [ -x "$SYS_ECL_PREFIX/bin/ecl.exe" ]; then
+          SYS_ECL_BIN="$SYS_ECL_PREFIX/bin/ecl.exe"
+        else
+          SYS_ECL_BIN="$SYS_ECL_PREFIX/bin/ecl"
+        fi
+      else
+        log "system ECL $SYS_ECL_VERSION found but its install prefix/libdir"
+        log "  could not be determined from ecl-config; building vendored ECL instead"
+      fi
+    else
+      log "system ECL $SYS_ECL_VERSION found but not compatible with the"
+      log "  pinned $ECL_VERSION (need same major version and >= $ECL_VERSION);"
+      log "  building vendored ECL instead (set MAXIMA_R_FORCE_VENDOR=true to"
+      log "  silence this and always build ECL from source)"
+    fi
+  fi
+fi
+
+# --- Stage 1: ECL --------------------------------------------------------
+
+if [ "$USE_SYSTEM_ECL" = "true" ]; then
+  log "using system ECL $SYS_ECL_VERSION ($SYS_ECL_PREFIX), skipping vendored build"
+  ECL_PREFIX="$SYS_ECL_PREFIX"
+  ECL_BIN="$SYS_ECL_BIN"
+  ECL_CONFIG="$SYS_ECL_CONFIG"
+  ECL_LIBDIR="$SYS_ECL_LIBDIR"
+else
+  ECL_STAMP="$STAMP_DIR/ecl-$ECL_VERSION"
+  if [ "$REBUILD" != "true" ] && [ -f "$ECL_STAMP" ] \
+     && { [ -x "$ECL_PREFIX/bin/ecl.exe" ] || [ -x "$ECL_PREFIX/bin/ecl" ]; }; then
+    log "ECL $ECL_VERSION already built, skipping (MAXIMA_R_REBUILD=true to force)"
+  else
+    ECL_TARBALL="$DL_DIR/ecl-$ECL_VERSION.tar.gz"
+    fetch "$ECL_URL" "$ECL_TARBALL"
+    sha256_check "$ECL_TARBALL" "$ECL_SHA256"
+
+    rm -rf "$SRC_DIR/ecl-$ECL_VERSION" "$ECL_PREFIX"
+    mkdir -p "$SRC_DIR/ecl-$ECL_VERSION"
+    log "extracting ECL source"
+    tar -xzf "$ECL_TARBALL" -C "$SRC_DIR/ecl-$ECL_VERSION" --strip-components=1
+
+    log "configuring ECL for mingw-w64 (this vendors GMP, Boehm-GC and"
+    log "  libffi -- no system Lisp, bignum, GC or FFI library is required)"
+    (
+      cd "$SRC_DIR/ecl-$ECL_VERSION"
+      # Same flags as ./configure's Stage 1, and the same --with-fpe=no
+      # rationale (see that file's comment) -- kept here defensively even
+      # though it's untested whether the same re-armed-FPU-trap issue
+      # reproduces under mingw-w64's SEH-based exception handling rather
+      # than POSIX SIGFPE. No --host: this is expected to run natively
+      # inside Rtools' MSYS2/mingw-w64 shell (its config.guess should
+      # detect x86_64-w64-mingw32 on its own from the mingw-w64 gcc
+      # already on PATH), matching ECL's own documented Windows build
+      # instructions (build from an MSYS2 MinGW64 shell, same commands as
+      # a Unix build). If config.guess instead misdetects the host here,
+      # passing --host=x86_64-w64-mingw32 explicitly is the fix to try.
+      ./configure --prefix="$ECL_PREFIX" --enable-threads=yes \
+        --enable-gmp=included --enable-boehm=included --with-dffi=included \
+        --with-fpe=no \
+        CFLAGS="-O2"
+      log "building ECL (this can take a few minutes)"
+      make -j"$(ncpus)"
+      make install
+    )
+    touch "$ECL_STAMP"
+  fi
+
+  if [ -x "$ECL_PREFIX/bin/ecl.exe" ]; then
+    ECL_BIN="$ECL_PREFIX/bin/ecl.exe"
+  else
+    ECL_BIN="$ECL_PREFIX/bin/ecl"
+  fi
+  ECL_CONFIG="$ECL_PREFIX/bin/ecl-config"
+  ECL_LIBDIR="$ECL_PREFIX/lib"
+fi
+
+# --- Stage 2: Maxima, built against the ECL from stage 1 -----------------
+# See ./configure's Stage 2 comment for why there's no "use system Maxima"
+# fast path -- the same two reasons apply unchanged on Windows (the
+# combined maxima.fas this package needs is a build-tree artifact that
+# `make install` never ships, and it only exists when Maxima is built
+# against ECL in the first place, which no packaged Maxima does).
+#
+# This is the single biggest unverified step in this script. Maxima's
+# own ./configure and Makefiles are the most likely place for Windows-
+# specific breakage (path handling with drive letters vs MSYS's /c/-style
+# paths being the classic failure mode for autoconf-based Lisp projects
+# under MSYS2) -- see inst/NOTES.md.
+
+MAXIMA_STAMP="$STAMP_DIR/maxima-$MAXIMA_VERSION"
+if [ "$REBUILD" != "true" ] && [ -f "$MAXIMA_STAMP" ] && [ -d "$MAXIMA_PREFIX" ]; then
+  log "Maxima $MAXIMA_VERSION already built, skipping (MAXIMA_R_REBUILD=true to force)"
+else
+  MAXIMA_TARBALL="$DL_DIR/maxima-$MAXIMA_VERSION.tar.gz"
+  fetch "$MAXIMA_URL" "$MAXIMA_TARBALL"
+  sha256_check "$MAXIMA_TARBALL" "$MAXIMA_SHA256"
+
+  rm -rf "$SRC_DIR/maxima-$MAXIMA_VERSION" "$MAXIMA_PREFIX"
+  mkdir -p "$SRC_DIR/maxima-$MAXIMA_VERSION"
+  log "extracting Maxima source"
+  tar -xzf "$MAXIMA_TARBALL" -C "$SRC_DIR/maxima-$MAXIMA_VERSION" --strip-components=1
+
+  log "configuring Maxima against the vendored ECL"
+  (
+    cd "$SRC_DIR/maxima-$MAXIMA_VERSION"
+    PATH="$ECL_PREFIX/bin:$PATH" \
+      ./configure --prefix="$MAXIMA_PREFIX" --enable-ecl --with-ecl="$ECL_BIN" \
+        --disable-build-docs
+    log "building Maxima (this is the long step -- compiles Maxima's full"
+    log "  Lisp source tree via ECL, expect this to take a while)"
+    PATH="$ECL_PREFIX/bin:$PATH" make -j"$(ncpus)"
+    PATH="$ECL_PREFIX/bin:$PATH" make install
+  )
+  touch "$MAXIMA_STAMP"
+fi
+
+# --- Stage 3: stage vendored runtime files under inst/, DLL under src/ --
+
+log "staging vendored ECL + Maxima runtime files"
+rm -rf "$INST_ECL_SUPPORT_DIR" "$INST_MAXIMA_CORE_DIR"
+mkdir -p "$INST_ECL_SUPPORT_DIR"
+rm -f "$PKG_ROOT"/src/libecl*.dll
+
+# libecl's runtime DLL. Unlike Unix (where ./configure copies libecl.so*/
+# libecl*.dylib into inst/libs/ and relies on an $ORIGIN/@loader_path
+# rpath baked into the compiled object to find it there), Windows has no
+# rpath: the fix used here is to drop the DLL into src/ so that R's own
+# Windows install step sweeps it into libs/<arch>/ alongside this
+# package's own compiled DLL -- the first directory Windows searches when
+# loading that DLL, which reproduces the same "next to itself, wherever R
+# installs it" behaviour the rpath gives on Unix. See the file banner
+# above and inst/NOTES.md. Because of that, this intentionally does NOT
+# copy into inst/libs/ the way ./configure does.
+#
+# mingw/libtool convention puts the runtime DLL in <prefix>/bin/ (not
+# <prefix>/lib/, where $ECL_LIBDIR/ecl-config points -- that's the import
+# library's location, only needed at link time) -- checked first, with
+# $ECL_LIBDIR as a fallback incase that convention doesn't hold for a
+# system ECL from Stage 0.
+copied_libecl=false
+for f in "$ECL_PREFIX"/bin/libecl*.dll "$ECL_LIBDIR"/libecl*.dll; do
+  if [ -e "$f" ]; then
+    cp "$f" "$PKG_ROOT/src/"
+    copied_libecl=true
+  fi
+done
+if [ "$copied_libecl" != "true" ]; then
+  log "ERROR: no libecl runtime DLL (libecl*.dll) found under"
+  log "  $ECL_PREFIX/bin or $ECL_LIBDIR"
+  exit 1
+fi
+
+# ECL's own Lisp-level support files (compiler, ASDF, ...), relocated via
+# the ECLDIR environment variable set in R/boot.R -- same as ./configure.
+ECL_SUPPORT_SRCDIR=$(find "$ECL_LIBDIR" -maxdepth 1 -type d -name 'ecl-*')
+cp -R "$ECL_SUPPORT_SRCDIR"/. "$INST_ECL_SUPPORT_DIR/"
+
+# The full Maxima install tree, relocated via MAXIMA_PREFIX -- same as
+# ./configure. Its internal layout (bin/lib/share, maxima.exe rather than
+# a bare `maxima` executable) is left untouched, same reasoning as Unix:
+# Maxima computes every other path relative to this one root.
+cp -R "$MAXIMA_PREFIX" "$INST_MAXIMA_CORE_DIR"
+
+# See ./configure's Stage 3 comment for why this build-tree fasl (not
+# anything `make install` ships) is what's needed. Assumed to be named
+# and located the same way regardless of host OS, since it's produced by
+# a Lisp-level build step (maxima.system's build-maxima-lib) rather than
+# anything platform-specific -- unverified on Windows.
+MAXIMA_FAS="$SRC_DIR/maxima-$MAXIMA_VERSION/src/binary-ecl/maxima.fas"
+if [ ! -f "$MAXIMA_FAS" ]; then
+  log "ERROR: expected $MAXIMA_FAS after building Maxima, but it's missing."
+  exit 1
+fi
+cp "$MAXIMA_FAS" "$INST_MAXIMA_CORE_DIR/maxima.fas"
+
+# --- Stage 4: generate src/Makevars.win ----------------------------------
+# Makevars.win (rather than Makevars, which ./configure writes for Unix)
+# is what R uses in its place on Windows. No -Wl,-rpath here -- see the
+# Stage 3 comment above for how the DLL is found instead.
+
+log "generating src/Makevars.win"
+ECL_CFLAGS=$("$ECL_CONFIG" --cflags)
+ECL_LIBS=$("$ECL_CONFIG" --libs)
+
+cat > "$PKG_ROOT/src/Makevars.win" <<EOF
+# Generated by configure.win -- do not edit by hand.
+PKG_CPPFLAGS = $ECL_CFLAGS
+PKG_LIBS = $ECL_LIBS
+CXX_STD = CXX11
+EOF
+
+log "configure.win done."

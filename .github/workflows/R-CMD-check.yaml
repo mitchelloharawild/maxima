@@ -1,0 +1,69 @@
+# Workflow derived from https://github.com/r-lib/actions/tree/v2/examples
+# Adapted for this package: a much longer timeout (building the vendored
+# ECL + Maxima from source is the long step -- longer still on Windows,
+# see inst/NOTES.md), and a cache keyed on the pinned versions in
+# tools/versions.sh so that only a version bump pays the full build cost
+# again.
+#
+# The windows-latest job exercises configure.win, which -- unlike the
+# macOS/Linux configure it mirrors -- has not yet been verified against a
+# real Windows build (it was written without one available); see the
+# "Windows build (configure.win)" section of inst/NOTES.md. Expect this
+# job to need iteration the first few times it actually runs. r-lib's
+# setup-r@v2 installs a matching Rtools automatically on windows-latest,
+# so no separate Rtools setup step is needed here.
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+name: R-CMD-check.yaml
+
+permissions: read-all
+
+jobs:
+  R-CMD-check:
+    runs-on: ${{ matrix.config.os }}
+    timeout-minutes: 120
+
+    name: ${{ matrix.config.os }} (${{ matrix.config.r }})
+
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - {os: macos-latest, r: 'release'}
+          - {os: windows-latest, r: 'release'}
+          - {os: ubuntu-latest, r: 'release'}
+
+    env:
+      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+      R_KEEP_PKG_SOURCE: yes
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: r-lib/actions/setup-pandoc@v2
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: ${{ matrix.config.r }}
+          http-user-agent: ${{ matrix.config.http-user-agent }}
+          use-public-rspm: true
+
+      - name: Cache the vendored ECL/Maxima build
+        uses: actions/cache@v4
+        with:
+          path: tools/build
+          key: ${{ matrix.config.os }}-maxima-vendor-${{ hashFiles('tools/versions.sh') }}
+
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          extra-packages: any::rcmdcheck
+          needs: check
+
+      - uses: r-lib/actions/check-r-package@v2
+        with:
+          upload-snapshots: true
+          build_args: 'c("--no-manual", "--no-build-vignettes")'

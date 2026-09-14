@@ -1,0 +1,25 @@
+#!/bin/sh
+# Cleanup script for the maxima R package, run on Windows in place of
+# ./cleanup (see "Writing R Extensions" on configure.win/cleanup.win
+# pairing). Undoes everything configure.win creates. See ./cleanup's own
+# comment for why this exists at all (R CMD build --clean and friends).
+# Safe to run repeatedly, and safe to run even if configure.win was never
+# run.
+
+set -e
+
+PKG_ROOT=$(pwd)
+
+log() { echo "*** maxima (cleanup.win): $*"; }
+
+log "removing generated src/Makevars.win, compiled objects and copied DLLs"
+rm -f "$PKG_ROOT/src/Makevars.win"
+rm -f "$PKG_ROOT"/src/*.o "$PKG_ROOT"/src/*.dll
+
+log "removing staged vendored ECL + Maxima runtime under inst/"
+rm -rf "$PKG_ROOT/inst/libs" "$PKG_ROOT/inst/ecl-support" "$PKG_ROOT/inst/maxima-core"
+
+log "removing build workspace and downloaded tarball cache under tools/"
+rm -rf "$PKG_ROOT/tools/build" "$PKG_ROOT/tools/downloads"
+
+log "cleanup.win done."
