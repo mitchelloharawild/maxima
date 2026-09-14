@@ -463,45 +463,32 @@ else
 
   # ecl.exe needs to find its own Lisp modules (cmp.fas and friends) via
   # the "SYS:" logical pathname host, which src/lsp/config.lsp.in sets
-  # from (si::get-library-pathname) -- ECLDIR if set, else (on Windows)
-  # GetModuleFileName("ecl.dll")'s own directory. Either way, that
-  # result only takes effect if cl_probe_file() on it succeeds (see
-  # si_get_library_pathname in ECL's unixfsys.d); if it doesn't, SYS:
-  # silently falls back to *default-pathname-defaults*, i.e. wherever
-  # ecl.exe happened to be launched *from* -- Maxima's own src/
-  # directory here, nowhere near cmp.fas. Confirmed by a real Windows
-  # CI run: ECL and Maxima both otherwise build and install cleanly,
-  # but loading maxima.system (which references c:build-fasl) fails
-  # with "Cannot find the external symbol BUILD-FASL in #<C package>"
-  # every time -- i.e. cmp (ECL's compiler module, providing that
-  # symbol) never actually got required successfully. The likely
-  # culprit is the same MSYS-vs-Windows-native path mismatch already
-  # hit for true_srcdir/true_builddir above: cl_probe_file() runs
-  # through ecl.exe's own (real mingw-w64, not MSYS-aware) file I/O, so
-  # an MSYS-style "/d/a/..." $ECL_PREFIX -- what every other use of it
-  # in this script is, since it's built by plain `pwd` -- likely fails
-  # that probe and triggers the fallback. Set ECLDIR explicitly to a
-  # Windows-native form (`pwd -W`, same fix as true_srcdir) so it
-  # resolves regardless of whether the self-location path above works.
-  ECL_PREFIX_NATIVE=$(cd "$ECL_PREFIX" && pwd -W)
-
-  # TEMPORARY DIAGNOSTIC (see inst/NOTES.md, "ecl.exe can't find its
-  # own cmp module"): setting ECLDIR to a Windows-native path alone
-  # didn't fix the symptom on a real Windows CI run, so print the
-  # actual facts instead of continuing to guess blind. Remove once
-  # this is root-caused.
-  log "diagnosing ECL library pathname resolution"
-  ECLDIR="$ECL_PREFIX_NATIVE" "$ECL_BIN" -norc \
-    -eval '(format t "~&DIAG ECLDIR env: ~S~%" (ext:getenv "ECLDIR"))' \
-    -eval '(format t "~&DIAG library-pathname: ~S~%" (si::get-library-pathname))' \
-    -eval '(format t "~&DIAG probe library-pathname: ~S~%" (probe-file (si::get-library-pathname)))' \
-    -eval '(format t "~&DIAG SYS: translations: ~S~%" (si::pathname-translations "SYS"))' \
-    -eval '(format t "~&DIAG probe SYS:cmp.fas: ~S~%" (probe-file "SYS:cmp.fas"))' \
-    -eval '(format t "~&DIAG *default-pathname-defaults*: ~S~%" *default-pathname-defaults*)' \
-    -eval '(format t "~&DIAG *modules*: ~S~%" *modules*)' \
-    -eval '(format t "~&DIAG do-symbols C: ~S~%" (loop for s being the external-symbols of (find-package "C") when (search "FASL" (string s)) collect s))' \
-    -eval '(quit)' \
-    < /dev/null 2>&1 || true
+  # up as `(merge-pathnames "**/*.*" (si::get-library-pathname))`.
+  # (si::get-library-pathname) is ECLDIR if set, else (on Windows)
+  # self-locates via GetModuleFileName("ecl.dll") -- and that
+  # self-location path (unlike a bare $ECLDIR) explicitly rebuilds the
+  # result through cl_make_pathname with :name/:type nil, i.e. forces
+  # it to be a proper *directory* pathname, not just any string that
+  # happens to name an existing directory. That distinction matters:
+  # merge-pathnames treats a defaults pathname with no trailing
+  # separator as ending in a *filename*, not a directory component --
+  # so a bare `.../tools/build/ecl` (no trailing slash, e.g. from `pwd
+  # -W`, which never adds one) merges as if the whole final "ecl"
+  # segment were a filename, losing it from the merged directory
+  # entirely and leaving SYS: pointing one level up, at
+  # `.../tools/build/**/*.*` instead of
+  # `.../tools/build/ecl/**/*.*`. Confirmed directly (not guessed) with
+  # a real Windows CI run: a diagnostic `ecl.exe -eval` probe showed
+  # exactly that -- (si::get-library-pathname) itself correct and even
+  # probe-file-able, but the live "SYS" pathname-translations one
+  # directory short, and (probe-file "SYS:cmp.fas") NIL as a direct
+  # result. (This is also why setting ECLDIR at all, alone, doesn't
+  # explain the original failure: the trailing slash is the whole
+  # story here, not cl_probe_file() failing outright as first
+  # hypothesized -- that turned out to succeed fine.) Fixed with a
+  # trailing slash on the value we hand ECLDIR, restoring the
+  # directory-pathname invariant the self-location path gets for free.
+  ECL_PREFIX_NATIVE=$(cd "$ECL_PREFIX" && pwd -W)/
 
   log "configuring Maxima against the vendored ECL"
   (

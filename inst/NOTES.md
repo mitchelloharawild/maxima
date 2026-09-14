@@ -476,40 +476,41 @@ ECL's module loader (`src/lsp/module.lsp`'s default
 `SYS:` logical-pathname host. For the actual, installed `ecl.exe`
 (distinct from the build-time `ecl_min.exe`/`bare.lsp`, which points
 `SYS:` at the source's own `build/` directory instead -- irrelevant
-here), `SYS:` is set from `(si::get-library-pathname)` in
-`src/lsp/config.lsp.in`, which wraps ECL's own C function
-`si_get_library_pathname()` (`src/c/unixfsys.d`): on Windows, absent an
-`ECLDIR` environment variable, that function self-locates via
-`GetModuleFileName` on `ecl.dll`'s own loaded module handle -- but
-*only* if the result passes its own `cl_probe_file()` sanity check
-immediately afterward; if that fails, it silently falls back to
-`current_dir()` (wherever `ecl.exe` happened to be launched *from* --
-Maxima's own `src/` directory here, nowhere near `cmp.fas`) instead of
-erroring. `cl_probe_file()` runs through `ecl.exe`'s own (real
-mingw-w64, not MSYS-aware) file I/O, so the likely culprit is the same
-MSYS-vs-Windows-native path mismatch already hit for
-`true_srcdir`/`true_builddir` above -- every use of `$ECL_PREFIX` in
-this script is an MSYS-style path (plain `pwd`), which a probe
-running through native Windows file I/O may simply not resolve.
+here), `SYS:` is set up by `src/lsp/config.lsp.in` as `(merge-pathnames
+"**/*.*" (si::get-library-pathname))`. `(si::get-library-pathname)`
+wraps ECL's own C function `si_get_library_pathname()`
+(`src/c/unixfsys.d`): `ECLDIR` if that environment variable is set,
+else (on Windows) self-locates via `GetModuleFileName` on `ecl.dll`'s
+own loaded module handle.
 
-Tried setting `ECLDIR` explicitly (rather than relying on
-self-location) to a Windows-native form of `$ECL_PREFIX` (`pwd -W`,
-same fix as `true_srcdir`) around Maxima's own `configure`/`make`/`make
-install` -- inherited by the `ecl.exe` subprocesses those spawn either
-directly or via Maxima's Makefile, since environment variables flow
-down through both Make and shell. **Confirmed by a real Windows CI run
-not to fix it**: identical error, now hit five times instead of three.
-So either `ECLDIR` didn't reach those subprocesses the way expected,
-or the `cl_probe_file()`/self-location theory above is simply wrong.
-Rather than keep guessing blind, `configure.win` now runs a temporary
-diagnostic `ecl.exe -eval ...` invocation right before Maxima's build,
-printing `(ext:getenv "ECLDIR")`, `(si::get-library-pathname)`, a
-`probe-file` on it, the live `"SYS"` pathname-translations, a
-`probe-file` on `"SYS:cmp.fas"` directly, `*default-pathname-defaults*`,
-`*modules*`, and which `C`-package external symbols contain "FASL" --
-straight to the same install log this whole investigation has been
-reading. Remove once this is actually root-caused; until then, treat
-everything above as an unconfirmed hypothesis, not the fix.
+First guess -- that `ECLDIR`, unset, was the whole problem, and that
+self-location was silently falling back to `current_dir()` because a
+`cl_probe_file()` sanity check on the located path was failing, likely
+another MSYS-vs-Windows-native path mismatch like `true_srcdir` above
+-- turned out wrong, confirmed by a real Windows CI run: explicitly
+setting `ECLDIR` to a Windows-native `$ECL_PREFIX` (`pwd -W`) around
+Maxima's `configure`/`make`/`make install` didn't fix anything,
+identical error. Rather than guess a third time, a temporary
+diagnostic `ecl.exe -eval ...` probe (same `ECLDIR`, run standalone
+right before Maxima's build) printed the actual live state straight to
+the install log, and that's what actually explains it:
+`(si::get-library-pathname)` itself came back correct and even
+`probe-file`-able (so the `cl_probe_file()` hypothesis was simply
+wrong -- that succeeds fine) -- but the live `"SYS"`
+pathname-translations were one directory short,
+`.../tools/build/**/*.*` instead of `.../tools/build/ecl/**/*.*`, and
+`(probe-file "SYS:cmp.fas")` came back `NIL` as direct confirmation.
+
+The actual mechanism: `merge-pathnames` treats a defaults pathname
+with no trailing separator as ending in a *filename*, not a directory
+component. `pwd -W` never adds a trailing slash, so the bare
+`.../tools/build/ecl` we handed `ECLDIR` merged as if the whole final
+`ecl` segment were a filename, losing it from the merged directory
+entirely. The self-location path doesn't have this problem because it
+explicitly rebuilds its result through `cl_make_pathname` with
+`:name`/`:type` `nil` -- forcing a proper directory pathname -- before
+handing it back; a bare `ECLDIR` string skips that. Fixed with a
+trailing slash on the value handed to `ECLDIR`.
 
 ## Relocatability
 
