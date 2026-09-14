@@ -1,0 +1,29 @@
+#' Call any Maxima function
+#'
+#' The generic mechanism this package is built around: builds and
+#' evaluates a call to any Maxima function by name, converting `...` with
+#' [as_mx_expr()] first. Because this doesn't hard-code which functions
+#' exist, it reaches every function Maxima has (present, or added in
+#' some future Maxima release) without this package needing to know
+#' about any of them ahead of time. There's no curated, per-function
+#' wrapper API here by design (see the package README); build one on top
+#' of this if you want argument-checking or defaults for a particular
+#' function.
+#'
+#' @param name The Maxima function's name, as you'd type it at the Maxima
+#'   prompt (e.g. `"integrate"`, `"diff"`, `"solve"`, `"expand"`).
+#' @param ... Arguments, coerced with [as_mx_expr()].
+#' @return An <mx_expr> object.
+#' @examples
+#' \dontrun{
+#' x <- mx_symbol("x")
+#' mx_call("diff", x^2, x)
+#' mx_call("integrate", x^2, x)
+#' mx_call("solve", x^2 == 4, x)
+#' }
+#' @export
+mx_call <- function(name, ...) {
+  ensure_booted()
+  args <- lapply(list(...), as_mx_expr)
+  mx_call_(name, args)
+}
