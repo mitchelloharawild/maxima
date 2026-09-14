@@ -295,6 +295,30 @@ dies (see the "Show install log on failure" CI step, added because
 otherwise -- R CMD check captures `configure`/`configure.win`'s entire
 transcript into `00install.out` but never prints it).
 
+## Windows: `bool` is a keyword under C23 (ECL's own `dpp.c`)
+
+Next run past the GMP fix above (GMP itself built and installed
+cleanly): died building ECL's own C bootstrap tool, `src/c/dpp.c:112`
+(part of ECL's normal build, nothing vendored/patched) --
+`error: 'bool' cannot be defined via 'typedef'` /
+`note: 'bool' is a keyword with '-std=c23' onwards`, from `typedef int
+bool;`, there for pre-C99 compilers lacking `<stdbool.h>`. Same
+underlying class of problem as the macOS `register`/C++17 issue: C23
+made `bool` a keyword (matching what C++ always had), so a compiler
+that now *defaults* to C23 or later hard-errors on redefining it via
+`typedef` -- Rtools45's gcc apparently defaults higher than C17 now.
+Fixed by adding `-std=gnu11` to the `CFLAGS` passed to ECL's own
+`./configure` in `configure.win` (pins the dialect the same way
+`-std=gnu++14` does for this package's own C++, in `src/Makevars.win`);
+doesn't conflict with the existing
+`-Wno-error=implicit-function-declaration`/`-Wno-error=implicit-int`
+flags there, which are GCC-version-triggered regardless of `-std=`, not
+dialect-triggered.
+
+Confirmed via a real Windows CI run: with just the GMP fix above, the
+build got measurably further (8 minutes vs. ~3) before dying here,
+which is what "past the GMP fix" above is based on.
+
 ## Relocatability
 
 Both ECL and Maxima bake in the `--prefix` path they were built with, and

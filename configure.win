@@ -332,11 +332,19 @@ SED_EOF
       # above; without this, GMP's configure reports every ABI it tries
       # (64, then 32) as "no, long long reliability test 1" and gives up
       # with "could not find a working compiler".
+      # -std=gnu11: ECL's own build-time helper tool, src/c/dpp.c, has
+      # `typedef int bool;` for pre-C99 compilers lacking <stdbool.h>.
+      # C23 made `bool` a keyword (like C++ always had it), so a compiler
+      # now defaulting to C23 hard-errors on that typedef ("'bool' cannot
+      # be defined via 'typedef'") -- confirmed against a real Windows CI
+      # run: Rtools45's gcc defaults higher than C17 now. Pinning the
+      # dialect keeps `bool` a plain identifier again, the same fix as
+      # -std=gnu++14 for this package's own C++ below (src/Makevars.win).
       ./configure --prefix="$ECL_PREFIX" --enable-threads=yes \
         --build=x86_64-w64-mingw32 --host=x86_64-w64-mingw32 \
         --enable-gmp=included --enable-boehm=included --with-dffi=included \
         --with-fpe=no \
-        CFLAGS="-O2 -w -Wno-error=implicit-function-declaration -Wno-error=implicit-int"
+        CFLAGS="-O2 -w -std=gnu11 -Wno-error=implicit-function-declaration -Wno-error=implicit-int"
       log "building ECL (this can take a few minutes)"
       make -j"$(ncpus)"
       make install
