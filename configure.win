@@ -520,6 +520,34 @@ else
     mv "$DEFSYSTEM_LISP.tmp" "$DEFSYSTEM_LISP"
   fi
 
+  # src/server.lisp installs a SIGPIPE handler guarded by `#+(and ecl
+  # (not windows))`, assuming :windows is the feature symbol that marks
+  # an ECL build as targeting Windows. It isn't, for this vendored
+  # mingw-w64 build: ECL's own src/lsp/config.lsp.in tests `(not
+  # windows) (not mingw32)` together for exactly this reason -- a
+  # mingw32 host carries :mingw32 in *features*, not :windows. So on
+  # this build server.lisp's guard is true on Windows too, and the
+  # reader chokes trying to read EXT:+SIGPIPE+ -- a symbol that isn't
+  # external in EXT here, since SIGPIPE doesn't exist on Windows:
+  # "Cannot find the external symbol +SIGPIPE+ in #<\"EXT\" package>."
+  # (seen verbatim in a real Windows CI run, while loading
+  # maxima.system to generate the dependency file, well before any of
+  # Maxima's own source is actually compiled). Patch the guard to also
+  # exclude :mingw32, matching ECL's own convention.
+  SERVER_LISP="$SRC_DIR/maxima-$MAXIMA_VERSION/src/server.lisp"
+  if ! grep -q 'maxima-r-mingw-no-sigpipe' "$SERVER_LISP"; then
+    log "patching src/server.lisp: SIGPIPE guard must also exclude mingw32"
+    sed -f - "$SERVER_LISP" > "$SERVER_LISP.tmp" <<'SED_EOF'
+s/^    #+(and ecl (not windows)) (ext:set-signal-handler EXT:+SIGPIPE+ 'ext:quit)$/    #+(and ecl (not windows) (not mingw32)) (ext:set-signal-handler EXT:+SIGPIPE+ 'ext:quit) ; maxima-r-mingw-no-sigpipe: see configure.win/
+SED_EOF
+    mv "$SERVER_LISP.tmp" "$SERVER_LISP"
+    if ! grep -q 'maxima-r-mingw-no-sigpipe' "$SERVER_LISP"; then
+      log "ERROR: failed to patch src/server.lisp's SIGPIPE guard for mingw32"
+      log "  (MAXIMA_VERSION may have changed the code this patch targets)"
+      exit 1
+    fi
+  fi
+
   log "configuring Maxima against the vendored ECL"
   (
     cd "$SRC_DIR/maxima-$MAXIMA_VERSION"
