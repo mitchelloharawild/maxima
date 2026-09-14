@@ -490,6 +490,28 @@ else
   # directory-pathname invariant the self-location path gets for free.
   ECL_PREFIX_NATIVE=$(cd "$ECL_PREFIX" && pwd -W)/
 
+  # TEMPORARY DIAGNOSTIC ROUND 2 (see inst/NOTES.md): the trailing
+  # slash above, confirmed correct by round 1's diagnostic in
+  # isolation, still didn't fix the real build on a real Windows CI
+  # run -- identical error. Reproducing the exact failing context this
+  # time (same cwd Maxima's own build uses, same ECLDIR-prefixed
+  # invocation style) instead of guessing why. Remove once root-caused.
+  log "diagnosing ECL library pathname resolution (round 2, in Maxima's src/)"
+  (
+    cd "$SRC_DIR/maxima-$MAXIMA_VERSION/src"
+    ECLDIR="$ECL_PREFIX_NATIVE" "$ECL_BIN" -norc \
+      -eval '(format t "~&DIAG2 ECLDIR env: ~S~%" (ext:getenv "ECLDIR"))' \
+      -eval '(format t "~&DIAG2 library-pathname: ~S~%" (si::get-library-pathname))' \
+      -eval '(format t "~&DIAG2 SYS: translations: ~S~%" (si::pathname-translations "SYS"))' \
+      -eval '(format t "~&DIAG2 probe SYS:cmp.fas: ~S~%" (probe-file "SYS:cmp.fas"))' \
+      -eval '(format t "~&DIAG2 default-pathname-defaults: ~S~%" *default-pathname-defaults*)' \
+      -eval '(require (quote cmp))' \
+      -eval '(format t "~&DIAG2 after require cmp, modules: ~S~%" *modules*)' \
+      -eval '(format t "~&DIAG2 fboundp c:build-fasl: ~S~%" (fboundp (quote c:build-fasl)))' \
+      -eval '(quit)' \
+      < /dev/null 2>&1 || true
+  )
+
   log "configuring Maxima against the vendored ECL"
   (
     cd "$SRC_DIR/maxima-$MAXIMA_VERSION"
