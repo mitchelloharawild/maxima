@@ -241,29 +241,58 @@ else
     # whose CRLF line endings otherwise trip R CMD check.
     rm -rf "$SRC_DIR/ecl-$ECL_VERSION/msvc"
 
-    # ECL's own configure already routes x86_64 around the vendored GMP's
-    # real assembly into its portable, assembly-free "none" build
-    # (with_c_gmp=yes) for the cygwin* host case, because that GMP is too
-    # old to support Windows64 calling conventions -- but the mingw* case
-    # right below it never got the same fix, even though it hits exactly
-    # the same problem: with ABI=64 forced, GMP assumes mp_limb_t is
-    # `unsigned long`, but mingw-w64's LLP64 model makes that 32 bits
-    # while the x86_64 assembly ABI=64 selects expects 64 ("Oops,
-    # mp_limb_t is 32 bits, but the assembler code in this configuration
-    # expects 64 bits."). Confirmed first real run, on GitHub Actions'
-    # windows-latest/Rtools45: GMP's configure dies at exactly this check
-    # without the patch below, which does for mingw* what ECL's configure
-    # already does for cygwin* (see inst/NOTES.md). Fails loudly if a
-    # future ECL_VERSION bump changes the code this patch targets.
+    # With ABI=64 forced, the vendored GMP's x86_64 assembly assumes
+    # mp_limb_t is `unsigned long` -- true on every real 64-bit Unix
+    # (LP64) but not on Windows' LLP64 model, where `long` stays 32 bits
+    # even in 64-bit builds. GMP's own "checking size of mp_limb_t" then
+    # comes out 32, mismatching the 64 bits its x86_64 assembly expects:
+    # "Oops, mp_limb_t is 32 bits, but the assembler code in this
+    # configuration expects 64 bits." Confirmed first real run, on GitHub
+    # Actions' windows-latest/Rtools45: GMP's configure dies at exactly
+    # this check.
+    #
+    # ECL's own configure already routes x86_64 around this into GMP's
+    # portable, assembly-free "none" build (with_c_gmp=yes) for the
+    # cygwin* host case, with a comment about GMP being too old for
+    # Windows64 calling conventions -- but the mingw* case right below it
+    # never got the same fix. Tried first (a smaller patch, just setting
+    # with_c_gmp=yes the same way for mingw*'s x86_64) -- confirmed by a
+    # real CI run *not* to be sufficient: with_c_gmp only rewrites
+    # --build, and GMP picks its per-host assembly path from --host (see
+    # its `case $host in x86_64-*-*)`, matched against the *full* triple,
+    # not just the CPU field), which with_c_gmp leaves untouched at the
+    # real "x86_64-w64-mingw32" -- so the mismatch was unchanged.
+    #
+    # What actually avoids it: also override --host to a "none-..."
+    # pseudo-triple, so GMP's host_cpu genuinely reads "none" and its
+    # `none-*-*)` case (abilist "long"/"longlong", no assembly) matches
+    # instead -- the same "both --build and --host" fix already applied
+    # for Apple Silicon in ./configure, and for the same underlying
+    # reason (GMP assembly assumptions that don't hold for this host).
+    # ECL 21.2.1 hardcodes --host=${host_alias} for GMP's nested
+    # ./configure invocation; the second and third sed commands below add
+    # the same gmp_host indirection ./configure's Apple-Silicon patch
+    # adds, so setting gmp_host here actually reaches that invocation.
+    # Fails loudly if a future ECL_VERSION bump changes the code this
+    # patch targets.
     ECL_CONFIGURE_SRC="$SRC_DIR/ecl-$ECL_VERSION/src/configure"
     if ! grep -q 'maxima-r-mingw-gmp-c-fallback' "$ECL_CONFIGURE_SRC"; then
       log "patching ECL's configure for mingw-w64 GMP support"
       sed -f - "$ECL_CONFIGURE_SRC" > "$ECL_CONFIGURE_SRC.tmp" <<'SED_EOF'
-/^                INSTALL_TARGET='flatinstall'$/i\
-                if test "x$host_cpu" = "xx86_64" ; then\
-                   # maxima-r-mingw-gmp-c-fallback: see configure.win\
-                   with_c_gmp=yes\
+/^        mingw\*)$/{
+a\
+                if test "x$host_cpu" = "xx86_64"; then\
+                  # maxima-r-mingw-gmp-c-fallback: see configure.win\
+                  gmp_build=none-w64-mingw32; gmp_host=none-w64-mingw32\
                 fi
+}
+/^  if test -z "\$gmp_build"; then$/{
+i\
+  if test -z "$gmp_host"; then\
+    gmp_host="${host_alias}"\
+  fi
+}
+s/^     --libdir=\${destdir} --build=\${gmp_build} --host=\${host_alias} \\$/     --libdir=${destdir} --build=${gmp_build} --host=${gmp_host} \\/
 SED_EOF
       chmod +x "$ECL_CONFIGURE_SRC.tmp"
       mv "$ECL_CONFIGURE_SRC.tmp" "$ECL_CONFIGURE_SRC"

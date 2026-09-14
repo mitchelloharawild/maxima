@@ -250,27 +250,46 @@ only Clang hard-errors on it. Fixed by also setting `PKG_CXXFLAGS =
 generated Makevars (not relied on CXX_STD alone); C++14 keeps `register`
 merely deprecated everywhere while still meeting cpp11's C++11 floor.
 
-## Windows: GMP too old for Win64 calling conventions (mingw*, not just cygwin*)
+## Windows: GMP's x86_64 assembly assumes a 64-bit `long` (mingw* needs its own fix, not cygwin*'s)
 
 First real Windows run past the GMP/m4 issues above (see "Windows build"
 below): died in GMP's own configure, `checking size of mp_limb_t... 4`
 then `configure: error: Oops, mp_limb_t is 32 bits, but the assembler
-code in this configuration expects 64 bits`. Root cause is in ECL's own
-`src/configure`, not this package's: for the `cygwin*` host case it
-already sets `with_c_gmp=yes` when `host_cpu` is `x86_64` (with the
-comment "Our GMP library is too old and does not support Windows64
-calling conventions"), which routes the vendored GMP into its portable,
-assembly-free "none" build instead of real x86_64 assembly. The `mingw*`
-case right below it never got the same treatment, even though it hits
-exactly the same problem: with `ABI=64` forced, GMP assumes `mp_limb_t`
-is `unsigned long`, but mingw-w64's LLP64 data model makes that 32 bits
-(`long` stays 32-bit on Windows even in 64-bit builds) while the x86_64
-assembly ABI=64 selects expects a 64-bit limb. Fixed the same way as the
-Apple Silicon GMP/libffi cases above: `configure.win` patches ECL's
-`src/configure` to add the same `with_c_gmp=yes` for x86_64 under
-`mingw*` that already exists for `cygwin*`.
+code in this configuration expects 64 bits`. With `ABI=64` forced, GMP's
+x86_64 assembly assumes `mp_limb_t` is `unsigned long` -- true on every
+real 64-bit Unix (LP64) but not on Windows' LLP64 data model, where
+`long` stays 32 bits even in 64-bit builds.
 
-Confirmed via a real Windows CI run that this is genuinely where it
+ECL's own `src/configure` already routes x86_64 around this into GMP's
+portable, assembly-free "none" build (`with_c_gmp=yes`) for the
+`cygwin*` host case, with a comment about GMP being too old for
+Windows64 calling conventions -- but the `mingw*` case right below it
+never got the same fix. First attempt: set `with_c_gmp=yes` the same way
+for `mingw*`'s `x86_64`, mirroring `cygwin*` exactly -- confirmed by a
+second real Windows CI run *not* to be sufficient (identical error,
+identical line): `with_c_gmp=yes` only rewrites `--build`, and GMP picks
+its per-host assembly path from `--host` (`case $host in x86_64-*-*)`,
+matched against the *full* triple, not just the CPU field), which
+`with_c_gmp` leaves untouched at the real `x86_64-w64-mingw32` -- so the
+mismatch was unchanged either way. (Whether `with_c_gmp=yes` actually
+does anything for real `cygwin*` users, or is a vestigial no-op there
+too, wasn't run down; Cygwin's data model is LP64, so it may simply
+never hit this particular mismatch regardless.)
+
+What actually avoids it: override *both* `--build` and `--host` to a
+`none-...` pseudo-triple, so GMP's `host_cpu` genuinely reads `none` and
+its `none-*-*)` case (abilist `long`/`longlong`, no assembly) matches
+instead of the real `x86_64-*-*)` case -- the same "both build and host"
+fix already applied for Apple Silicon above, and for the same underlying
+reason (GMP assembly assumptions that don't hold for the host). ECL
+21.2.1 hardcodes `--host=${host_alias}` for GMP's nested
+`./configure` invocation (unlike `--build`, which already goes through a
+`gmp_build` variable); `configure.win` now patches in the same
+`gmp_host` indirection `./configure`'s Apple-Silicon patch adds, so that
+setting `gmp_host` for `mingw*` actually reaches that invocation.
+
+Confirmed via real Windows CI runs (twice: once to find this, once to
+rule out the `with_c_gmp=yes`-alone fix) that this is genuinely where it
 dies (see the "Show install log on failure" CI step, added because
 `check-r-package` gave zero diagnosable output on an install failure
 otherwise -- R CMD check captures `configure`/`configure.win`'s entire
