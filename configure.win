@@ -461,20 +461,44 @@ else
   log "extracting Maxima source"
   tar -xzf "$MAXIMA_TARBALL" -C "$SRC_DIR/maxima-$MAXIMA_VERSION" --strip-components=1
 
+  # ecl.exe needs to find its own Lisp modules (cmp.fas and friends) via
+  # the "SYS:" logical pathname host, which src/lsp/config.lsp.in sets
+  # from (si::get-library-pathname) -- ECLDIR if set, else (on Windows)
+  # GetModuleFileName("ecl.dll")'s own directory. Either way, that
+  # result only takes effect if cl_probe_file() on it succeeds (see
+  # si_get_library_pathname in ECL's unixfsys.d); if it doesn't, SYS:
+  # silently falls back to *default-pathname-defaults*, i.e. wherever
+  # ecl.exe happened to be launched *from* -- Maxima's own src/
+  # directory here, nowhere near cmp.fas. Confirmed by a real Windows
+  # CI run: ECL and Maxima both otherwise build and install cleanly,
+  # but loading maxima.system (which references c:build-fasl) fails
+  # with "Cannot find the external symbol BUILD-FASL in #<C package>"
+  # every time -- i.e. cmp (ECL's compiler module, providing that
+  # symbol) never actually got required successfully. The likely
+  # culprit is the same MSYS-vs-Windows-native path mismatch already
+  # hit for true_srcdir/true_builddir above: cl_probe_file() runs
+  # through ecl.exe's own (real mingw-w64, not MSYS-aware) file I/O, so
+  # an MSYS-style "/d/a/..." $ECL_PREFIX -- what every other use of it
+  # in this script is, since it's built by plain `pwd` -- likely fails
+  # that probe and triggers the fallback. Set ECLDIR explicitly to a
+  # Windows-native form (`pwd -W`, same fix as true_srcdir) so it
+  # resolves regardless of whether the self-location path above works.
+  ECL_PREFIX_NATIVE=$(cd "$ECL_PREFIX" && pwd -W)
+
   log "configuring Maxima against the vendored ECL"
   (
     cd "$SRC_DIR/maxima-$MAXIMA_VERSION"
     # Same --build/--host fix as ECL's own configure above: Maxima's
     # configure has its own mingw-specific branch that the same
     # config.guess misdetection would otherwise skip.
-    PATH="$ECL_BINDIR:$PATH" \
+    PATH="$ECL_BINDIR:$PATH" ECLDIR="$ECL_PREFIX_NATIVE" \
       ./configure --prefix="$MAXIMA_PREFIX" --enable-ecl --with-ecl="$ECL_BIN" \
         --build=x86_64-w64-mingw32 --host=x86_64-w64-mingw32 \
         --disable-build-docs
     log "building Maxima (this is the long step -- compiles Maxima's full"
     log "  Lisp source tree via ECL, expect this to take a while)"
-    PATH="$ECL_BINDIR:$PATH" make -j"$(ncpus)"
-    PATH="$ECL_BINDIR:$PATH" make install
+    PATH="$ECL_BINDIR:$PATH" ECLDIR="$ECL_PREFIX_NATIVE" make -j"$(ncpus)"
+    PATH="$ECL_BINDIR:$PATH" ECLDIR="$ECL_PREFIX_NATIVE" make install
   )
   touch "$MAXIMA_STAMP"
 fi

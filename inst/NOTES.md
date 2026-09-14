@@ -450,6 +450,59 @@ have. Fixed by also trying an `ecl*.dll` pattern against `$ECL_LIBDIR`,
 alongside the existing `libecl*.dll` ones (kept, for that system-ECL
 case).
 
+## Windows: `ecl.exe` can't find its own `cmp` module (SYS: resolves against the wrong directory)
+
+Next run past the `ecl.dll` fix (furthest yet: ECL *and* Maxima both
+fully built *and* installed by `make`/`make install` -- no error from
+either): died on this script's own defensive check again, this time
+for the combined fasl `maxima.fas`, which `configure`'s matching
+comment already flags as something `make install` never ships (see
+"Maxima's ECL build doesn't install its combined fasl" above) -- built
+separately, straight from the source tree, by the same
+`echo '...(build-maxima-lib)...' | ecl.exe -norc` invocation visible
+in the install log (run redundantly three times, apparently once per
+`make`/`make install` re-entry into that directory -- harmless, all
+three failed identically). Every one of them dies immediately on
+`(load ".../maxima.system")` -- before `(build-maxima-lib)` even runs
+-- with a *reader* error: `Cannot find the external symbol BUILD-FASL
+in #<"C" package>`. `BUILD-FASL` is defined and exported from ECL's
+own `cmp` (compiler) module (`src/cmp/cmpmain.lsp`/`cmppackage.lsp`),
+autoloaded via `(require 'cmp)` the first time it's needed -- so this
+means `cmp` itself was never successfully loaded.
+
+ECL's module loader (`src/lsp/module.lsp`'s default
+`*module-provider-functions*` entry) looks for a module by `(load
+(make-pathname :name module :defaults "SYS:"))` -- i.e. under the
+`SYS:` logical-pathname host. For the actual, installed `ecl.exe`
+(distinct from the build-time `ecl_min.exe`/`bare.lsp`, which points
+`SYS:` at the source's own `build/` directory instead -- irrelevant
+here), `SYS:` is set from `(si::get-library-pathname)` in
+`src/lsp/config.lsp.in`, which wraps ECL's own C function
+`si_get_library_pathname()` (`src/c/unixfsys.d`): on Windows, absent an
+`ECLDIR` environment variable, that function self-locates via
+`GetModuleFileName` on `ecl.dll`'s own loaded module handle -- but
+*only* if the result passes its own `cl_probe_file()` sanity check
+immediately afterward; if that fails, it silently falls back to
+`current_dir()` (wherever `ecl.exe` happened to be launched *from* --
+Maxima's own `src/` directory here, nowhere near `cmp.fas`) instead of
+erroring. `cl_probe_file()` runs through `ecl.exe`'s own (real
+mingw-w64, not MSYS-aware) file I/O, so the likely culprit is the same
+MSYS-vs-Windows-native path mismatch already hit for
+`true_srcdir`/`true_builddir` above -- every use of `$ECL_PREFIX` in
+this script is an MSYS-style path (plain `pwd`), which a probe
+running through native Windows file I/O may simply not resolve.
+
+Fixed by setting `ECLDIR` explicitly (rather than relying on
+self-location) to a Windows-native form of `$ECL_PREFIX` (`pwd -W`,
+same fix as `true_srcdir`) around Maxima's own `configure`/`make`/`make
+install` -- inherited by the `ecl.exe` subprocesses those spawn either
+directly or via Maxima's Makefile, since environment variables flow
+down through both Make and shell. Not independently confirmed that
+`cl_probe_file()` failing on the MSYS-style path is the *exact*
+mechanism (no way to attach a debugger in CI), only that explicitly
+setting `ECLDIR` to a form that's already been confirmed to matter
+elsewhere on this exact host fixes the symptom.
+
 ## Relocatability
 
 Both ECL and Maxima bake in the `--prefix` path they were built with, and
