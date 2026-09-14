@@ -253,11 +253,28 @@ else
       # fails outright on the same misdetected host. Passing both host and
       # build explicitly makes ECL's configure (and everything it
       # subconfigures) see mingw-w64 directly instead of re-deriving it.
+      # -Wno-error=implicit-function-declaration: the vendored GMP 4.2.1's
+      # own configure probes a compiler quirk ("gnupro alpha ev6 char
+      # spilling") with a conftest that calls memcpy() without
+      # <string.h>. Harmless under the old compilers that probe predates,
+      # but Rtools45's gcc 14 treats implicit function declarations as a
+      # hard error by default (unaffected by plain -w), which makes that
+      # probe -- and so GMP's whole configure -- fail outright.
+      # -Wno-error=implicit-int: same vintage-vs-gcc-14 problem, different
+      # probe: GMP's own ABI/"long long reliability" conftest defines
+      # several K&R-style helper functions with no return type
+      # (`f(){...}`, `h(){}`, `g(){}`), relying on old implicit-int
+      # defaulting. gcc 14 hard-errors on that too now (confirmed by
+      # reproducing this exact conftest against gcc 14 -- gcc 13 still
+      # only warns), independently of -Wno-error=implicit-function-declaration
+      # above; without this, GMP's configure reports every ABI it tries
+      # (64, then 32) as "no, long long reliability test 1" and gives up
+      # with "could not find a working compiler".
       ./configure --prefix="$ECL_PREFIX" --enable-threads=yes \
         --build=x86_64-w64-mingw32 --host=x86_64-w64-mingw32 \
         --enable-gmp=included --enable-boehm=included --with-dffi=included \
         --with-fpe=no \
-        CFLAGS="-O2 -w"
+        CFLAGS="-O2 -w -Wno-error=implicit-function-declaration -Wno-error=implicit-int"
       log "building ECL (this can take a few minutes)"
       make -j"$(ncpus)"
       make install

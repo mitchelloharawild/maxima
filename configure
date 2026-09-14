@@ -249,9 +249,55 @@ i\
 }
 s/^     --libdir=\${destdir} --build=\${gmp_build} --host=\${host_alias} \\$/     --libdir=${destdir} --build=${gmp_build} --host=${gmp_host} \\/
 SED_EOF
+      # sed's `>` output is a fresh file (mode subject to umask, not
+      # executable) -- restore the +x the original configure script had,
+      # or `mv`-ing it over the original leaves a non-executable
+      # src/configure that later fails with "Permission denied".
+      chmod +x "$ECL_CONFIGURE_SRC.tmp"
       mv "$ECL_CONFIGURE_SRC.tmp" "$ECL_CONFIGURE_SRC"
       if ! grep -q 'arm64\*|aarch64\*)' "$ECL_CONFIGURE_SRC"; then
         log "ERROR: failed to patch ECL's configure for Apple Silicon support"
+        log "  (ECL_VERSION may have changed the code this patch targets)"
+        exit 1
+      fi
+    fi
+
+    # ECL's bundled libffi vendors its own copy of config.guess, which
+    # independently re-derives the host triple and has the same
+    # Apple-Silicon gap as ECL's own (patched above): on arm64 Darwin it
+    # reports the CPU field as "arm" (from `uname -p`, which stays "arm"
+    # on Apple Silicon regardless of bit width), not "aarch64". Unlike
+    # the GMP case above -- which sidesteps this by matching on
+    # `uname -m` directly, not the host triple -- ECL passes libffi's
+    # nested ./configure a bare ${build_alias}/${host_alias} (whatever
+    # was, or here wasn't, given to *this* configure invocation), so
+    # libffi's own stale config.guess runs and mis-detects. Its
+    # configure.host then matches "arm-apple-darwin*" against the
+    # generic 32-bit ARM case (not AArch64's), silently building
+    # src/arm/*.S instead of src/aarch64/*.S -- the wrong-architecture
+    # object code, missing ffi_call/ffi_prep_cif_machdep/etc., caught
+    # only at final link ("Undefined symbols for architecture arm64").
+    #
+    # Fixed narrowly, by overriding just this one nested --build/--host
+    # with a correctly-canonicalized triple on arm64 Darwin -- not by
+    # passing --build/--host to *this* (ECL's top-level) configure,
+    # which would also reach GMP's nested configure above and defeat
+    # its own deliberate non-cross-compiling "none" build.
+    if ! grep -q 'MAXIMA_R_LIBFFI_HOST' "$ECL_CONFIGURE_SRC"; then
+      log "patching ECL's configure for Apple Silicon (arm64) libffi support"
+      sed -f - "$ECL_CONFIGURE_SRC" > "$ECL_CONFIGURE_SRC.tmp" <<'SED_EOF'
+/^ test -d libffi && rm -rf libffi$/i\
+ MAXIMA_R_LIBFFI_HOST=""\
+ case "$(uname -s)-$(uname -m)" in\
+   Darwin-arm64) MAXIMA_R_LIBFFI_HOST="aarch64-apple-darwin$(uname -r)" ;;\
+ esac
+s/--build=\${build_alias} \\$/--build=${MAXIMA_R_LIBFFI_HOST:-$build_alias} \\/
+s/--host=\${host_alias} --disable-multi-os-directory --disable-docs \\$/--host=${MAXIMA_R_LIBFFI_HOST:-$host_alias} --disable-multi-os-directory --disable-docs \\/
+SED_EOF
+      chmod +x "$ECL_CONFIGURE_SRC.tmp"
+      mv "$ECL_CONFIGURE_SRC.tmp" "$ECL_CONFIGURE_SRC"
+      if ! grep -q 'MAXIMA_R_LIBFFI_HOST' "$ECL_CONFIGURE_SRC"; then
+        log "ERROR: failed to patch ECL's configure for Apple Silicon libffi support"
         log "  (ECL_VERSION may have changed the code this patch targets)"
         exit 1
       fi
@@ -261,6 +307,15 @@ SED_EOF
     log "  Lisp, bignum, GC or FFI library is required)"
     (
       cd "$SRC_DIR/ecl-$ECL_VERSION"
+      # Newer Xcode clang rejects libffi's aarch64/sysv.S CFI directives
+      # ("invalid CFI advance_loc expression", libffi#852) even though its
+      # own CFI-support probe (asmcfi.m4) passes. Pre-set that probe's
+      # cache var so it comes out "no" instead, which drops CFI (only
+      # needed for unwind info, not ffi_call correctness) and avoids the
+      # bad directives entirely.
+      if [ "$(uname -s)-$(uname -m)" = "Darwin-arm64" ]; then
+        export gcc_cv_as_cfi_pseudo_op=no
+      fi
       # --with-fpe=no: ECL's SIGFPE trap-to-condition otherwise raises a
       # spurious FLOATING-POINT-INVALID-OPERATION during Maxima's startup
       # inside R's process. Maxima's own error reporting doesn't rely on
@@ -268,10 +323,17 @@ SED_EOF
       # -w: silences vendored ECL/GMP/Boehm-GC/libffi's own upstream
       # warnings, which R CMD check's as-cran install step would otherwise
       # flag as a WARNING under this package's error-on-warning CI policy.
+      # -Wno-error=implicit-function-declaration, -Wno-error=implicit-int:
+      # see the matching CFLAGS comment in configure.win -- two separate
+      # vendored GMP 4.2.1 configure probes each fail outright on any
+      # compiler (e.g. gcc >= 14, confirmed on Rtools45's Windows build;
+      # not yet observed with ubuntu-latest's gcc, which is still on 13)
+      # that hard-errors on either by default; -w alone doesn't cover
+      # either one.
       ./configure --prefix="$ECL_PREFIX" --enable-threads=yes \
         --enable-gmp=included --enable-boehm=included --with-dffi=included \
         --with-fpe=no \
-        CFLAGS="-fPIC -O2 -w"
+        CFLAGS="-fPIC -O2 -w -Wno-error=implicit-function-declaration -Wno-error=implicit-int"
       log "building ECL (this can take a few minutes)"
       make -j"$(ncpus)"
       make install

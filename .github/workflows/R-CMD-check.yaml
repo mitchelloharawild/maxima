@@ -47,6 +47,18 @@ jobs:
           http-user-agent: ${{ matrix.config.http-user-agent }}
           use-public-rspm: true
 
+      - name: Install m4 (GMP configure dependency, Windows only)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          # Vendored GMP's ./configure needs m4, but Rtools' MSYS2
+          # toolchain doesn't ship it. Install via Rtools' own pacman
+          # (env var name varies by Rtools version, so find it).
+          rtools_home_var=$(compgen -v | grep -m1 '^RTOOLS.*_HOME$')
+          rtools_home="${!rtools_home_var}"
+          rtools_home="${rtools_home//\\//}"
+          "$rtools_home/usr/bin/pacman.exe" -Sy --noconfirm m4
+
       - name: Cache the vendored ECL/Maxima build
         uses: actions/cache@v4
         with:
