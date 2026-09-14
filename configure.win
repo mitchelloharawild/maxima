@@ -222,10 +222,16 @@ if [ "$USE_SYSTEM_ECL" = "true" ]; then
   ECL_BIN="$SYS_ECL_BIN"
   ECL_CONFIG="$SYS_ECL_CONFIG"
   ECL_LIBDIR="$SYS_ECL_LIBDIR"
+  ECL_BINDIR="$SYS_ECL_PREFIX/bin"
 else
   ECL_STAMP="$STAMP_DIR/ecl-$ECL_VERSION"
+  # flatinstall (see the matching comment below, where ECL_BIN is set
+  # for this branch) means the built exe lands directly in $ECL_PREFIX,
+  # not $ECL_PREFIX/bin -- checked here too so a cache hit on
+  # tools/build is actually recognized as "already built" instead of
+  # needlessly rebuilding every run.
   if [ "$REBUILD" != "true" ] && [ -f "$ECL_STAMP" ] \
-     && { [ -x "$ECL_PREFIX/bin/ecl.exe" ] || [ -x "$ECL_PREFIX/bin/ecl" ]; }; then
+     && { [ -x "$ECL_PREFIX/ecl.exe" ] || [ -x "$ECL_PREFIX/ecl" ]; }; then
     log "ECL $ECL_VERSION already built, skipping (MAXIMA_R_REBUILD=true to force)"
   else
     ECL_TARBALL="$DL_DIR/ecl-$ECL_VERSION.tar.gz"
@@ -409,13 +415,28 @@ SED_EOF
     touch "$ECL_STAMP"
   fi
 
-  if [ -x "$ECL_PREFIX/bin/ecl.exe" ]; then
-    ECL_BIN="$ECL_PREFIX/bin/ecl.exe"
+  # ECL's own configure hardcodes INSTALL_TARGET=flatinstall for mingw*
+  # (see its src/configure and inst/NOTES.md): plain `make install`
+  # above didn't use the usual bin/lib/include hierarchy this block
+  # assumed -- ECL's own top-level Makefile.in forwards `install` to
+  # `cd build; make $(INSTALL_TARGET)`, and flatinstall sets
+  # bindir=libdir=includedir=ecldir=$(prefix), installing everything
+  # (the exe, libecl*.dll, headers, and ECL's own Lisp support tree)
+  # directly into $ECL_PREFIX itself, with no subdirectories at all.
+  # Confirmed by a real Windows CI run: assuming bin/ here (as this
+  # block did before) silently produced a nonexistent --with-ecl path
+  # for Maxima's configure ("ecl executable .../bin/ecl not found in
+  # PATH", a non-fatal warning there) that only failed loudly once
+  # Maxima's own build actually tried to run it ("No such file or
+  # directory").
+  if [ -x "$ECL_PREFIX/ecl.exe" ]; then
+    ECL_BIN="$ECL_PREFIX/ecl.exe"
   else
-    ECL_BIN="$ECL_PREFIX/bin/ecl"
+    ECL_BIN="$ECL_PREFIX/ecl"
   fi
-  ECL_CONFIG="$ECL_PREFIX/bin/ecl-config"
-  ECL_LIBDIR="$ECL_PREFIX/lib"
+  ECL_CONFIG="$ECL_PREFIX/ecl-config"
+  ECL_LIBDIR="$ECL_PREFIX"
+  ECL_BINDIR="$ECL_PREFIX"
 fi
 
 # --- Build Maxima against that ECL ------------------------------------------
@@ -446,14 +467,14 @@ else
     # Same --build/--host fix as ECL's own configure above: Maxima's
     # configure has its own mingw-specific branch that the same
     # config.guess misdetection would otherwise skip.
-    PATH="$ECL_PREFIX/bin:$PATH" \
+    PATH="$ECL_BINDIR:$PATH" \
       ./configure --prefix="$MAXIMA_PREFIX" --enable-ecl --with-ecl="$ECL_BIN" \
         --build=x86_64-w64-mingw32 --host=x86_64-w64-mingw32 \
         --disable-build-docs
     log "building Maxima (this is the long step -- compiles Maxima's full"
     log "  Lisp source tree via ECL, expect this to take a while)"
-    PATH="$ECL_PREFIX/bin:$PATH" make -j"$(ncpus)"
-    PATH="$ECL_PREFIX/bin:$PATH" make install
+    PATH="$ECL_BINDIR:$PATH" make -j"$(ncpus)"
+    PATH="$ECL_BINDIR:$PATH" make install
   )
   touch "$MAXIMA_STAMP"
 fi
@@ -470,9 +491,11 @@ rm -f "$PKG_ROOT"/src/libecl*.dll
 # file banner above and inst/NOTES.md) -- deliberately not copied into
 # inst/libs/ the way ./configure does on Unix.
 #
-# mingw/libtool convention puts the runtime DLL in <prefix>/bin/ (checked
-# first), falling back to $ECL_LIBDIR in case that doesn't hold for a
-# system ECL.
+# A normal (hierarchical) install puts the runtime DLL in <prefix>/bin/
+# (checked first, e.g. for a system ECL); flatinstall (hardcoded for
+# mingw*, see the ECL_BIN comment above and inst/NOTES.md) drops it
+# directly in $ECL_PREFIX == $ECL_LIBDIR instead, covered by the second
+# pattern.
 copied_libecl=false
 for f in "$ECL_PREFIX"/bin/libecl*.dll "$ECL_LIBDIR"/libecl*.dll; do
   if [ -e "$f" ]; then
@@ -487,9 +510,15 @@ if [ "$copied_libecl" != "true" ]; then
 fi
 
 # ECL's own Lisp support files, relocated via ECLDIR (see R/boot.R) --
-# same as ./configure.
-ECL_SUPPORT_SRCDIR=$(find "$ECL_LIBDIR" -maxdepth 1 -type d -name 'ecl-*')
-cp -R "$ECL_SUPPORT_SRCDIR"/. "$INST_ECL_SUPPORT_DIR/"
+# same idea as ./configure, but a normal (hierarchical) install's
+# isolated lib/ecl-VERSION/ subdirectory (found below, e.g. for a
+# system ECL) doesn't exist under flatinstall (hardcoded for mingw*,
+# see the ECL_BIN comment above and inst/NOTES.md): ECL_LIBDIR (==
+# $ECL_PREFIX for the vendored build) *is* that content already, mixed
+# in with the exe/DLL/headers, so fall back to copying it wholesale --
+# an empty `find` match would otherwise silently make this `cp -R /.`.
+ECL_SUPPORT_SRCDIR=$(find "$ECL_LIBDIR" -maxdepth 1 -type d -name 'ecl-*' 2>/dev/null | head -n1)
+cp -R "${ECL_SUPPORT_SRCDIR:-$ECL_LIBDIR}"/. "$INST_ECL_SUPPORT_DIR/"
 
 # The full Maxima install tree, relocated via MAXIMA_PREFIX -- same as
 # ./configure; internal layout (maxima.exe rather than a bare `maxima`)

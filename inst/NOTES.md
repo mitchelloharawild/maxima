@@ -398,6 +398,43 @@ Fixed by patching this condition to *also* accept `$host` saying
 patch changes the check to
 `uname -a | grep -i 'mingw' > /dev/null || echo "$host" | grep -qi 'mingw'`.
 
+## Windows: ECL's own `install` means `flatinstall` for `mingw*`, not the usual bin/lib layout
+
+Next run past the `true_srcdir` fix (furthest yet -- ECL fully built,
+`bin/ecl.exe` linked, `make install` completed): Maxima's own configure
+printed a non-fatal warning, `ecl executable .../ecl/bin/ecl not found
+in PATH`, then Maxima's build died for real trying to actually run that
+same path: `/bin/sh: .../ecl/bin/ecl: No such file or directory`.
+
+Root cause: ECL's own top-level `Makefile.in` (one directory up from
+`src/`) doesn't run the `install:` target this whole script's comments
+assumed -- it's just `cd build; $(MAKE) $(INSTALL_TARGET)`, and
+`$(INSTALL_TARGET)` is `flatinstall` for `mingw*` (see the "GMP...
+64 bits" section above: set alongside `with_fpe='no'` in that same
+stock `mingw*)` case body, not something this package patches).
+`flatinstall`'s own recipe is
+`$(MAKE) bindir=$(prefix) libdir=$(prefix) includedir=$(prefix)
+ecldir=$(prefix) install` -- i.e. it reruns the *real* `install` target
+with every one of its destination variables collapsed to the bare
+prefix, so the exe, `libecl*.dll`, headers, and ECL's own Lisp support
+tree (normally isolated under `lib/ecl-VERSION/`) all land directly in
+`$ECL_PREFIX`, no `bin/`/`lib/`/`include/` subdirectories at all. Every
+place in `configure.win` that computed a path under the vendored
+`$ECL_PREFIX` (`ECL_BIN`, `ECL_CONFIG`, `ECL_LIBDIR`, the `PATH=`
+prefixes used to run Maxima's own build, the libecl DLL search, and the
+Lisp-support-directory copy) still assumed the ordinary hierarchical
+layout, so all of them were silently wrong for the vendored build --
+just masked until whichever one got used first actually needed to
+exist. Fixed by pointing all of them at `$ECL_PREFIX` directly for the
+vendored case (kept as the hierarchical `bin`/`lib` paths for a system
+ECL via `ecl-config`, e.g. from `pacman -S mingw-w64-x86_64-ecl`, which
+*does* follow the normal MSYS2 package layout); the Lisp-support-copy
+and libecl-DLL-search sites already tolerated either layout gracefully
+once `ECL_LIBDIR` itself was fixed, except the support-copy's `find
+... -name 'ecl-*'` had to gain a `${x:-$ECL_LIBDIR}`-style fallback, to
+avoid silently becoming `cp -R /. ...` when that pattern matches
+nothing under a flat install.
+
 ## Relocatability
 
 Both ECL and Maxima bake in the `--prefix` path they were built with, and
