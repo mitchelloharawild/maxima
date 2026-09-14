@@ -71,17 +71,13 @@ test_that("Math.mx_expr dispatches R Math generics to the same-named Maxima func
 
 test_that("Math.mx_expr forwards extra arguments (e.g. log(x, base)) to Maxima", {
   local_maxima()
-  # Maxima's log() is unary, so the `...` in Math.mx_expr's signature is
-  # ignored (as documented) rather than raising an R argument-matching
-  # error -- log(x, base) reaches Maxima as plain log(x).
+  # Extra args are ignored: log(x, base) reaches Maxima as plain log(x).
   expect_equal(as.double(log(mx_call("exp", 1), base = exp(1))), 1)
 })
 
 test_that("Math.mx_expr doesn't validate that Maxima defines the dispatched-to function", {
   local_maxima()
   x <- mx_symbol("x")
-  # cumsum() has no single-argument Maxima counterpart that simplifies a
-  # bare symbol, so it stays an ordinary unevaluated call -- the same way
-  # mx_call() itself reaches an unrecognised name (see test-call.R).
+  # cumsum() has no Maxima counterpart, so it stays an unevaluated call.
   expect_equal(format(cumsum(x)), "cumsum(x)")
 })

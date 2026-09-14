@@ -23,8 +23,7 @@ test_that("solve() returns multiple solutions", {
 test_that("Maxima errors become R errors, without corrupting later calls", {
   local_maxima()
   x <- mx_symbol("x")
-  # A genuine Maxima-level error (division by zero) should surface as an R
-  # error, and the engine should still work immediately afterward.
+  # Division by zero surfaces as an R error; the engine keeps working.
   one <- as_mx_expr(1L)
   zero <- as_mx_expr(0L)
   expect_error(one / zero)

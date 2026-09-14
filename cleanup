@@ -1,14 +1,9 @@
 #!/bin/sh
-# Cleanup script for the maxima R package.
-#
-# Undoes everything ./configure creates: the generated src/Makevars, this
-# package's own compiled objects, and the vendored ECL + Maxima runtime
-# staged under inst/ and built under tools/ (see configure). R CMD build
-# does not run this automatically -- it's invoked by `R CMD build --clean`
-# and by `make clean`-style workflows -- so without it those generated
-# files would otherwise be shipped in the source tarball (Writing R
-# Extensions requires a cleanup script for exactly this reason). Safe to
-# run repeatedly, and safe to run even if configure was never run.
+# Cleanup script for the maxima R package. Undoes everything ./configure
+# creates (generated src/Makevars, compiled objects, vendored ECL/Maxima
+# runtime under inst/ and tools/), so those files aren't shipped in the
+# source tarball -- run via `R CMD build --clean`. Safe to run repeatedly
+# or without configure having run.
 
 set -e
 

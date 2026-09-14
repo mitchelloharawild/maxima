@@ -2,56 +2,39 @@
 # Configure script for the maxima R package, run by R CMD INSTALL on
 # Windows (in place of ./configure) via the sh bundled with Rtools.
 #
-# WARNING TO MAINTAINERS: this script has not been exercised on a real
-# Windows machine (it was written on Linux, with no Windows/Rtools/MSYS2
-# environment available to build and iterate against). It mirrors
-# ./configure's structure and reasoning as closely as Windows allows, but
-# every Windows-specific decision below -- most importantly, where the
-# built libecl DLL ends up and how it's found at runtime -- needs to be
-# checked against a real build the first time this actually runs. See the
-# "Windows build (configure.win)" section of inst/NOTES.md for a list of
-# the specific things most likely to need fixing, and update that section
-# (rather than just silently patching around a problem here) once any of
-# this has been verified or corrected against a real build.
+# WARNING TO MAINTAINERS: untested on a real Windows machine (written on
+# Linux, no Windows/Rtools/MSYS2 environment available). Mirrors
+# ./configure's structure as closely as Windows allows, but every
+# Windows-specific decision below -- especially where the built libecl
+# DLL ends up and how it's found at runtime -- needs checking against a
+# real build. See "Windows build (configure.win)" in inst/NOTES.md for
+# what's most likely to need fixing, and update that section once
+# anything here has been verified or corrected.
 #
-# Structurally this follows ./configure exactly: same four stages (system
-# ECL fast path, build ECL, build Maxima against it, stage the vendored
-# runtime under inst/), same pinned versions from tools/versions.sh, same
-# MAXIMA_R_OFFLINE/MAXIMA_R_REBUILD/MAXIMA_R_FORCE_VENDOR env vars. See
-# ./configure's own comments for the rationale behind each stage; this
-# file only comments on where and why Windows differs. It is a separate,
-# self-contained script (rather than one sourced by ./configure) because
-# R never runs both on the same platform, and keeping the divergent parts
-# -- Stage 3's runtime-library handling and Stage 4's Makevars.win -- in
-# one place per platform is easier to follow than threading `case` branches
-# through a single shared script for logic that is otherwise identical.
+# Structurally follows ./configure: same steps (system ECL fast path,
+# build ECL, build Maxima against it, install the vendored runtime under
+# inst/), same pinned versions and env vars. See ./configure's own
+# comments for the rationale behind each step; this file only comments on
+# where Windows differs. Kept as a separate, self-contained script
+# (rather than sourced by ./configure) since R never runs both on the
+# same platform, and keeping the divergent runtime-library/Makevars.win
+# handling in one place per platform reads easier than threading `case`
+# branches through one shared script.
 #
-# Three Windows differences drive most of what's different below:
+# Three Windows differences drive most of what's below:
 #
-#   1. No rpath. ELF's $ORIGIN (what ./configure's Stage 4 uses so the
-#      package's compiled object finds libecl next to itself, wherever R
-#      installs the package) has no Windows equivalent. Windows instead
-#      searches the directory of the *loading* module first, so the fix
-#      is to get libecl's DLL into the same directory R ultimately installs
-#      this package's own compiled DLL into. The documented way to do that
-#      (see "Writing R Extensions" on configure.win, and how e.g. the
-#      `units`/`magick` packages ship an extra runtime DLL on Windows) is
-#      to drop it into src/ before `make` runs: R's own Windows install
-#      step sweeps every *.dll left in src/ into libs/<arch>/ alongside
-#      the package's own, which is exactly the same directory Windows will
-#      search first when loading it. Stage 3 below does that instead of
-#      copying into inst/libs/ the way ./configure does for Linux/macOS.
-#   2. Different toolchain layout. Rtools' MSYS2/mingw-w64 build of ECL
-#      installs the actual libecl-*.dll into <prefix>/bin/ (mingw/libtool
-#      convention: runtime DLLs in bin/, the .dll.a import library used
-#      only at link time in lib/), not <prefix>/lib/ where ./configure
-#      finds libecl.so*/libecl*.dylib on Unix. Stage 3 looks in bin/ first.
-#   3. .exe/.dll naming and paths use backslashes once outside the MSYS
-#      shell, but everything here stays inside MSYS-provided tools (cp,
-#      tar, ecl-config's own shell script, ...), which accept the same
-#      forward-slash paths as Unix; no path translation is done here on
-#      the assumption that's unnecessary. If Maxima's own ./configure or
-#      build chokes on that assumption, that's the next thing to check.
+#   1. No rpath. Windows searches the loading module's own directory
+#      first, so libecl's DLL is dropped into src/ before `make` runs: R's
+#      Windows install step sweeps every *.dll in src/ into libs/<arch>/
+#      alongside this package's own compiled DLL, which is exactly the
+#      directory Windows searches. See "Writing R Extensions" on
+#      configure.win for this pattern.
+#   2. Different toolchain layout: Rtools' MSYS2/mingw-w64 ECL build
+#      installs libecl-*.dll into <prefix>/bin/ (mingw/libtool convention),
+#      not <prefix>/lib/ where ./configure finds it on Unix.
+#   3. Paths use backslashes outside the MSYS shell, but everything here
+#      stays inside MSYS-provided tools, which accept forward slashes; no
+#      translation is done, on the assumption that's unnecessary.
 
 set -e
 
@@ -76,10 +59,8 @@ mkdir -p "$DL_DIR" "$BUILD_DIR" "$STAMP_DIR"
 log() { echo "*** maxima (configure.win): $*"; }
 
 ncpus() {
-  # Rtools' sh always has NUMBER_OF_PROCESSORS in its environment
-  # (inherited from Windows itself); nproc/sysctl are checked first only
-  # for parity with ./configure in case this ever runs in some other
-  # MSYS2-alike that doesn't set it.
+  # Rtools' sh always has NUMBER_OF_PROCESSORS set; nproc/sysctl checked
+  # first only for parity with ./configure.
   if command -v nproc >/dev/null 2>&1; then nproc
   elif [ -n "${NUMBER_OF_PROCESSORS:-}" ]; then echo "$NUMBER_OF_PROCESSORS"
   else echo 2
@@ -182,10 +163,8 @@ ecl_config_libdir() {
   echo "$libdir"
 }
 
-# A C/C++ toolchain here means Rtools' mingw-w64 gcc/g++, expected already
-# on PATH by the time R runs configure.win (that's how Rtools wires itself
-# into R CMD INSTALL). We only sanity-check it's reachable, same as
-# ./configure does for cc/gcc.
+# Rtools' mingw-w64 gcc/g++ is expected already on PATH (how Rtools wires
+# itself into R CMD INSTALL); just sanity-check it's reachable.
 if ! command -v gcc >/dev/null 2>&1 && ! command -v cc >/dev/null 2>&1; then
   log "ERROR: no C compiler (gcc/cc) found on PATH. Install Rtools"
   log "  (https://cran.r-project.org/bin/windows/Rtools/) and make sure"
@@ -197,11 +176,10 @@ need_cmd tar
 
 REBUILD="${MAXIMA_R_REBUILD:-false}"
 
-# --- Stage 0: detect a usable system ECL --------------------------------
-# Same idea and same compatibility rule as ./configure's Stage 0 -- see
-# its comments. Included here mainly for symmetry (e.g. an MSYS2 install
-# with ECL added via `pacman -S mingw-w64-x86_64-ecl`) even though in
-# practice most Windows installs will fall through to Stage 1.
+# --- Detect a usable system ECL -------------------------------------------
+# Same rule as ./configure. Included mainly for symmetry (e.g. ECL via
+# `pacman -S mingw-w64-x86_64-ecl`); most Windows installs fall through to
+# building ECL below.
 USE_SYSTEM_ECL=false
 if [ "${MAXIMA_R_FORCE_VENDOR:-false}" != "true" ] \
    && command -v ecl-config >/dev/null 2>&1 && command -v ecl >/dev/null 2>&1; then
@@ -236,7 +214,7 @@ if [ "${MAXIMA_R_FORCE_VENDOR:-false}" != "true" ] \
   fi
 fi
 
-# --- Stage 1: ECL --------------------------------------------------------
+# --- Build ECL -------------------------------------------------------------
 
 if [ "$USE_SYSTEM_ECL" = "true" ]; then
   log "using system ECL $SYS_ECL_VERSION ($SYS_ECL_PREFIX), skipping vendored build"
@@ -259,25 +237,27 @@ else
     log "extracting ECL source"
     tar -xzf "$ECL_TARBALL" -C "$SRC_DIR/ecl-$ECL_VERSION" --strip-components=1
 
+    # See ./configure's matching comment: unused legacy MSVC build of GMP,
+    # whose CRLF line endings otherwise trip R CMD check.
+    rm -rf "$SRC_DIR/ecl-$ECL_VERSION/msvc"
+
     log "configuring ECL for mingw-w64 (this vendors GMP, Boehm-GC and"
     log "  libffi -- no system Lisp, bignum, GC or FFI library is required)"
     (
       cd "$SRC_DIR/ecl-$ECL_VERSION"
-      # Same flags as ./configure's Stage 1, and the same --with-fpe=no
-      # rationale (see that file's comment) -- kept here defensively even
-      # though it's untested whether the same re-armed-FPU-trap issue
-      # reproduces under mingw-w64's SEH-based exception handling rather
-      # than POSIX SIGFPE. No --host: this is expected to run natively
-      # inside Rtools' MSYS2/mingw-w64 shell (its config.guess should
-      # detect x86_64-w64-mingw32 on its own from the mingw-w64 gcc
-      # already on PATH), matching ECL's own documented Windows build
-      # instructions (build from an MSYS2 MinGW64 shell, same commands as
-      # a Unix build). If config.guess instead misdetects the host here,
-      # passing --host=x86_64-w64-mingw32 explicitly is the fix to try.
+      # Same --with-fpe=no/-w rationale as ./configure. --host/--build are
+      # needed here because, on R CMD INSTALL's actual Rtools sh (not an
+      # interactive MSYS2 shell), config.guess misdetects the host as
+      # x86_64-pc-msys instead of x86_64-w64-mingw32: ECL's configure then
+      # skips its `mingw*)` branch, and the vendored GMP sub-configure
+      # fails outright on the same misdetected host. Passing both host and
+      # build explicitly makes ECL's configure (and everything it
+      # subconfigures) see mingw-w64 directly instead of re-deriving it.
       ./configure --prefix="$ECL_PREFIX" --enable-threads=yes \
+        --build=x86_64-w64-mingw32 --host=x86_64-w64-mingw32 \
         --enable-gmp=included --enable-boehm=included --with-dffi=included \
         --with-fpe=no \
-        CFLAGS="-O2"
+        CFLAGS="-O2 -w"
       log "building ECL (this can take a few minutes)"
       make -j"$(ncpus)"
       make install
@@ -294,18 +274,14 @@ else
   ECL_LIBDIR="$ECL_PREFIX/lib"
 fi
 
-# --- Stage 2: Maxima, built against the ECL from stage 1 -----------------
-# See ./configure's Stage 2 comment for why there's no "use system Maxima"
-# fast path -- the same two reasons apply unchanged on Windows (the
-# combined maxima.fas this package needs is a build-tree artifact that
-# `make install` never ships, and it only exists when Maxima is built
-# against ECL in the first place, which no packaged Maxima does).
+# --- Build Maxima against that ECL ------------------------------------------
+# See ./configure for why there's no "use system Maxima" fast path -- the
+# same two reasons apply unchanged on Windows.
 #
-# This is the single biggest unverified step in this script. Maxima's
-# own ./configure and Makefiles are the most likely place for Windows-
-# specific breakage (path handling with drive letters vs MSYS's /c/-style
-# paths being the classic failure mode for autoconf-based Lisp projects
-# under MSYS2) -- see inst/NOTES.md.
+# This is the single biggest unverified step in this script: Maxima's own
+# ./configure and Makefiles are the most likely place for Windows-specific
+# breakage (drive-letter vs MSYS /c/-style paths is the classic failure
+# mode here) -- see inst/NOTES.md.
 
 MAXIMA_STAMP="$STAMP_DIR/maxima-$MAXIMA_VERSION"
 if [ "$REBUILD" != "true" ] && [ -f "$MAXIMA_STAMP" ] && [ -d "$MAXIMA_PREFIX" ]; then
@@ -323,8 +299,12 @@ else
   log "configuring Maxima against the vendored ECL"
   (
     cd "$SRC_DIR/maxima-$MAXIMA_VERSION"
+    # Same --build/--host fix as ECL's own configure above: Maxima's
+    # configure has its own mingw-specific branch that the same
+    # config.guess misdetection would otherwise skip.
     PATH="$ECL_PREFIX/bin:$PATH" \
       ./configure --prefix="$MAXIMA_PREFIX" --enable-ecl --with-ecl="$ECL_BIN" \
+        --build=x86_64-w64-mingw32 --host=x86_64-w64-mingw32 \
         --disable-build-docs
     log "building Maxima (this is the long step -- compiles Maxima's full"
     log "  Lisp source tree via ECL, expect this to take a while)"
@@ -334,29 +314,21 @@ else
   touch "$MAXIMA_STAMP"
 fi
 
-# --- Stage 3: stage vendored runtime files under inst/, DLL under src/ --
+# --- Install vendored runtime files under inst/, DLL under src/ ------------
 
 log "staging vendored ECL + Maxima runtime files"
 rm -rf "$INST_ECL_SUPPORT_DIR" "$INST_MAXIMA_CORE_DIR"
 mkdir -p "$INST_ECL_SUPPORT_DIR"
 rm -f "$PKG_ROOT"/src/libecl*.dll
 
-# libecl's runtime DLL. Unlike Unix (where ./configure copies libecl.so*/
-# libecl*.dylib into inst/libs/ and relies on an $ORIGIN/@loader_path
-# rpath baked into the compiled object to find it there), Windows has no
-# rpath: the fix used here is to drop the DLL into src/ so that R's own
-# Windows install step sweeps it into libs/<arch>/ alongside this
-# package's own compiled DLL -- the first directory Windows searches when
-# loading that DLL, which reproduces the same "next to itself, wherever R
-# installs it" behaviour the rpath gives on Unix. See the file banner
-# above and inst/NOTES.md. Because of that, this intentionally does NOT
-# copy into inst/libs/ the way ./configure does.
+# libecl's runtime DLL, dropped into src/ so R's Windows install step
+# sweeps it into libs/<arch>/ alongside this package's own DLL (see the
+# file banner above and inst/NOTES.md) -- deliberately not copied into
+# inst/libs/ the way ./configure does on Unix.
 #
-# mingw/libtool convention puts the runtime DLL in <prefix>/bin/ (not
-# <prefix>/lib/, where $ECL_LIBDIR/ecl-config points -- that's the import
-# library's location, only needed at link time) -- checked first, with
-# $ECL_LIBDIR as a fallback incase that convention doesn't hold for a
-# system ECL from Stage 0.
+# mingw/libtool convention puts the runtime DLL in <prefix>/bin/ (checked
+# first), falling back to $ECL_LIBDIR in case that doesn't hold for a
+# system ECL.
 copied_libecl=false
 for f in "$ECL_PREFIX"/bin/libecl*.dll "$ECL_LIBDIR"/libecl*.dll; do
   if [ -e "$f" ]; then
@@ -370,22 +342,20 @@ if [ "$copied_libecl" != "true" ]; then
   exit 1
 fi
 
-# ECL's own Lisp-level support files (compiler, ASDF, ...), relocated via
-# the ECLDIR environment variable set in R/boot.R -- same as ./configure.
+# ECL's own Lisp support files, relocated via ECLDIR (see R/boot.R) --
+# same as ./configure.
 ECL_SUPPORT_SRCDIR=$(find "$ECL_LIBDIR" -maxdepth 1 -type d -name 'ecl-*')
 cp -R "$ECL_SUPPORT_SRCDIR"/. "$INST_ECL_SUPPORT_DIR/"
 
 # The full Maxima install tree, relocated via MAXIMA_PREFIX -- same as
-# ./configure. Its internal layout (bin/lib/share, maxima.exe rather than
-# a bare `maxima` executable) is left untouched, same reasoning as Unix:
-# Maxima computes every other path relative to this one root.
+# ./configure; internal layout (maxima.exe rather than a bare `maxima`)
+# untouched.
 cp -R "$MAXIMA_PREFIX" "$INST_MAXIMA_CORE_DIR"
 
-# See ./configure's Stage 3 comment for why this build-tree fasl (not
-# anything `make install` ships) is what's needed. Assumed to be named
-# and located the same way regardless of host OS, since it's produced by
-# a Lisp-level build step (maxima.system's build-maxima-lib) rather than
-# anything platform-specific -- unverified on Windows.
+# See ./configure for why this build-tree fasl (not anything `make
+# install` ships) is needed. Assumed to be named/located the same
+# regardless of host OS, since it's a Lisp-level build artifact --
+# unverified on Windows.
 MAXIMA_FAS="$SRC_DIR/maxima-$MAXIMA_VERSION/src/binary-ecl/maxima.fas"
 if [ ! -f "$MAXIMA_FAS" ]; then
   log "ERROR: expected $MAXIMA_FAS after building Maxima, but it's missing."
@@ -393,10 +363,9 @@ if [ ! -f "$MAXIMA_FAS" ]; then
 fi
 cp "$MAXIMA_FAS" "$INST_MAXIMA_CORE_DIR/maxima.fas"
 
-# --- Stage 4: generate src/Makevars.win ----------------------------------
-# Makevars.win (rather than Makevars, which ./configure writes for Unix)
-# is what R uses in its place on Windows. No -Wl,-rpath here -- see the
-# Stage 3 comment above for how the DLL is found instead.
+# --- Generate src/Makevars.win ----------------------------------------------
+# What R uses in place of Makevars on Windows. No -Wl,-rpath -- see above
+# for how the DLL is found instead.
 
 log "generating src/Makevars.win"
 ECL_CFLAGS=$("$ECL_CONFIG" --cflags)

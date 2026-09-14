@@ -6,9 +6,7 @@ test_that("mx_call() reaches functions this package has no bespoke wrapper for",
 
 test_that("mx_call()'s ... arguments are each coerced with as_mx_expr()", {
   local_maxima()
-  # Plain numbers and strings passed straight through (not wrapped
-  # beforehand) still reach Maxima correctly, exactly like mx_call("sqrt",
-  # 4) does elsewhere.
+  # Plain numbers/strings, not pre-wrapped, still reach Maxima correctly.
   expect_equal(as.double(mx_call("max", 1, 5, 3)), 5)
   expect_equal(format(mx_call("concat", mx_string("a"), mx_string("b"))), "\"ab\"")
 })
@@ -24,10 +22,7 @@ test_that("mx_call() composes with itself and with symbols in either argument po
 test_that("mx_call() reaching an unknown Maxima function name doesn't error", {
   local_maxima()
   x <- mx_symbol("x")
-  # There's no argument-checking or a curated function list by design (see
-  # ?mx_call): a name Maxima doesn't recognise as a defined function
-  # simply stays an unevaluated symbolic call, the same way it would if
-  # typed at the Maxima prompt.
+  # An unrecognised function name stays an unevaluated symbolic call.
   expect_equal(format(mx_call("totally_unknown_fn", x)), "totally_unknown_fn(x)")
 })
 

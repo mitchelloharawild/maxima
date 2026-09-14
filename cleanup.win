@@ -1,10 +1,8 @@
 #!/bin/sh
 # Cleanup script for the maxima R package, run on Windows in place of
-# ./cleanup (see "Writing R Extensions" on configure.win/cleanup.win
-# pairing). Undoes everything configure.win creates. See ./cleanup's own
-# comment for why this exists at all (R CMD build --clean and friends).
-# Safe to run repeatedly, and safe to run even if configure.win was never
-# run.
+# ./cleanup (see "Writing R Extensions" on the configure.win/cleanup.win
+# pairing). Undoes everything configure.win creates; see ./cleanup for why
+# this exists. Safe to run repeatedly or without configure.win having run.
 
 set -e
 

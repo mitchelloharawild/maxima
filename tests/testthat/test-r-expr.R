@@ -1,12 +1,8 @@
-# Further coverage of as_r_expr() beyond what's already in test-maxima.R
-# (basic arithmetic, mx_call() results, solve()'s list form, booleans,
-# ratios and strings, and the error paths).
+# Further as_r_expr() coverage beyond test-maxima.R.
 
 test_that("as_r_expr() maps the core constants %e, %pi and %i to their R equivalents", {
   local_maxima()
-  # mx_symbol()/mx_call() always build "$"-prefixed user-level symbols, so
-  # the only way to reach Maxima's own %e/%pi/%i constants is as the
-  # *result* of a computation that returns them symbolically.
+  # %e/%pi/%i are only reachable as a computed result, not built directly.
   expect_equal(eval(as_r_expr(mx_call("exp", 1))), exp(1))
   expect_equal(eval(as_r_expr(mx_call("acos", -1))), pi)
   expect_equal(eval(as_r_expr(mx_call("sqrt", -1))), complex(imaginary = 1))

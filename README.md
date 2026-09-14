@@ -36,9 +36,6 @@ That first install therefore takes a while (compiling Maxima’s full
 source tree is the long step); see `tools/versions.sh` for the exact
 pinned versions being built.
 
-Windows support (`configure.win`) is new and has not yet been verified
-on a real Windows machine; see `inst/NOTES.md` if it fails to build.
-
 ## Example
 
 ``` r

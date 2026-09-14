@@ -1,8 +1,5 @@
-// The R-facing GC-protected handle: an external pointer wrapping a
-// protected cl_object, mirroring what "Writing R Extensions" describes
-// for R_PreserveObject/R_ReleaseObject, but for the other side of the
-// language boundary (an ECL object referenced only from R). See
-// ecl_embed.h for the protection mechanism itself.
+// R-facing GC-protected handle: an external pointer wrapping a protected
+// cl_object (see ecl_embed.h).
 #pragma once
 
 #include <cpp11.hpp>
@@ -19,16 +16,15 @@ inline void mx_handle_deleter(MxHandle *h) { delete h; }
 
 using mx_handle_ptr = cpp11::external_pointer<MxHandle, mx_handle_deleter>;
 
-// Wrap a freshly-built (or returned) cl_object as an R "mx_expr" external
-// pointer.
+// Wraps a cl_object as an R "mx_expr" external pointer.
 inline mx_handle_ptr mx_wrap(cl_object obj) {
   mx_handle_ptr ptr(new MxHandle(obj));
   Rf_setAttrib(ptr, R_ClassSymbol, Rf_mkString("mx_expr"));
   return ptr;
 }
 
-// Unwrap an R "mx_expr" external pointer back to its cl_object. Throws an
-// R error (via cpp11::stop) if `x` isn't one of ours.
+// Unwraps an "mx_expr" external pointer back to its cl_object. Throws an
+// R error if `x` isn't one of ours.
 inline cl_object mx_unwrap(SEXP x) {
   if (TYPEOF(x) != EXTPTRSXP) {
     cpp11::stop("expected an <mx_expr> object");

@@ -1,9 +1,5 @@
-# Shared across every test file below (testthat auto-sources helper-*.R
-# files before running tests). These tests boot the real, vendored Maxima
-# core -- there is nothing to mock here (the whole point of this package is
-# the embedding), so they are skipped rather than faked on any install
-# where boot fails (e.g. a platform this package's configure doesn't
-# support yet).
+# Boots the real, vendored Maxima core; skips the test if boot fails
+# rather than mocking it.
 local_maxima <- function() {
   ok <- tryCatch({
     mx_start()

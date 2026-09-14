@@ -3,9 +3,7 @@ test_that("mx_symbol() creates a symbol, case-insensitively", {
   x <- mx_symbol("x")
   expect_s3_class(x, "mx_expr")
   expect_equal(format(x), "x")
-  # Maxima is case-insensitive on the way in; mx_symbol() upper-cases
-  # internally and Maxima's own printer lower-cases again on the way out,
-  # so differently-cased spellings name the very same symbol.
+  # Differently-cased spellings name the same symbol.
   expect_equal(format(mx_symbol("X")), "x")
   expect_true(as.logical(eval(as_r_expr(mx_call("is", mx_symbol("X") == mx_symbol("x"))))))
 })
@@ -16,8 +14,7 @@ test_that("mx_string() creates a distinct string value, not a symbol", {
   expect_s3_class(s, "mx_expr")
   expect_equal(format(s), "\"hello\"")
   expect_equal(as.character(as_r_expr(s)), "hello")
-  # A string and a symbol of the same name print differently in Maxima,
-  # the same distinction the docs draw.
+  # A string and a symbol of the same name print differently.
   expect_false(identical(format(s), format(mx_symbol("hello"))))
 })
 
@@ -38,9 +35,7 @@ test_that("as_mx_expr.numeric distinguishes whole values from fractional ones", 
 
 test_that("as_mx_expr.numeric treats very large whole doubles as floats, not integers", {
   local_maxima()
-  # Past 2^53 a double can no longer represent every integer exactly, so
-  # as_mx_expr.numeric() deliberately stops treating whole-valued doubles
-  # as exact integers there (see its source comment).
+  # Past 2^53 a double can't represent every integer exactly.
   big <- 2^60
   v <- as_mx_expr(big)
   expect_s3_class(v, "mx_expr")

@@ -53,11 +53,8 @@ as_mx_expr.numeric <- function(x) {
   if (is.na(x)) {
     stop("NA cannot be converted to an <mx_expr>", call. = FALSE)
   }
-  # R has no everyday syntax distinguishing "2" from "2L", and almost
-  # nobody writes the latter; treating a whole-valued double as an exact
-  # integer (like other symbolic-math R packages do) means x^2 reads back
-  # as x^2, not x^2.0, without giving up is.integer()-typed input being
-  # honoured exactly.
+  # Treat whole-valued doubles as exact integers, so x^2 reads back as
+  # x^2, not x^2.0.
   is_whole <- is.integer(x) ||
     (is.double(x) && x == round(x) && abs(x) < 2^53)
   mx_from_double_(as.double(x), is_whole)

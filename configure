@@ -1,43 +1,23 @@
 #!/bin/sh
 # Configure script for the maxima R package.
 #
-# This package embeds ECL (Embeddable Common Lisp) and the Maxima computer
-# algebra system directly into R. Rather than depending on a system install
-# of either (which, for Maxima, is almost never built against ECL anyway --
-# see inst/NOTES.md), this script downloads and compiles both from source,
-# entirely self-contained (ECL's own copies of GMP, Boehm-GC and libffi are
-# used, so no system Lisp, CAS, or bignum/GC/FFI library is required either)
-# so that the only prerequisites are R and a working C/C++ toolchain.
+# Downloads and builds ECL and Maxima from source, entirely self-contained
+# (including ECL's own GMP/Boehm-GC/libffi), so only R and a C/C++
+# toolchain are required. A system Maxima can't be reused (see below); a
+# system ECL is reused when compatible, since CRAN policy asks packages to
+# look for an existing install first -- set MAXIMA_R_FORCE_VENDOR=true to
+# always build ECL from source instead. Either way, only a package-shipped
+# ECL is loaded at runtime (see R/boot.R).
 #
-# CRAN Repository Policy asks that a package installation "first look to
-# see if it is already installed and if so is of a suitable version" before
-# building a bundled copy of a dependency from source. Stage 0 below does
-# that for ECL: if a compatible ecl/ecl-config is already on PATH, the slow
-# from-source Stage 1 build is skipped and the system ECL is used to build
-# Maxima instead. Its shared library and support files are still copied
-# into inst/ in Stage 3 exactly as a vendor-built ECL's would be, so the
-# runtime contract (R/boot.R always loads a package-shipped ECL, never a
-# live system one) is unaffected either way -- only the build-time cost of
-# compiling ECL is avoided. Set MAXIMA_R_FORCE_VENDOR=true to always build
-# ECL from source regardless of what's already installed. Maxima itself is
-# always built from source; see the comment at Stage 2 for why a similar
-# system-Maxima fast path isn't realistically achievable.
-#
-# Set MAXIMA_R_OFFLINE=true and pre-populate tools/downloads/ with the two
-# tarballs (see tools/versions.sh) to install without network access.
-# Set MAXIMA_R_REBUILD=true to force rebuilding even if a previous build's
-# stamp files are present (useful during development of this package).
+# Set MAXIMA_R_OFFLINE=true and pre-populate tools/downloads/ (see
+# tools/versions.sh) to install without network access. Set
+# MAXIMA_R_REBUILD=true to force a rebuild despite existing stamp files.
 
 set -e
 
-# R CMD INSTALL runs this script with CC/CFLAGS/CPPFLAGS/... set from R's
-# own Makeconf (tuned for R's own compiled code, and on some R builds
-# including flags -- e.g. very new -std= dialects -- that trip up ECL's
-# and GMP's own bundled autoconf-based configure scripts in ways unrelated
-# to anything R itself needs). The vendored ECL/Maxima build below is
-# fully isolated from the R package it ends up linked into (only
-# ecl-config's own output feeds back into src/Makevars), so it's run in a
-# clean environment instead of inheriting R's.
+# Run in a clean environment, not R's own Makeconf flags -- those can trip
+# up ECL/GMP's own configure scripts, and don't feed into this build
+# anyway (only ecl-config's output reaches src/Makevars).
 unset CC CFLAGS CPPFLAGS CXX CXXFLAGS LDFLAGS LIBS MAKEFLAGS
 
 PKG_ROOT=$(pwd)
@@ -97,9 +77,8 @@ fetch() {
   fi
   log "downloading $url"
   if command -v curl >/dev/null 2>&1; then
-    # Checked explicitly (rather than left to `set -e`) so a network
-    # failure gets our own informative message before the script exits,
-    # instead of just curl/wget's raw stderr.
+    # Checked explicitly so a network failure gets our own message, not
+    # curl/wget's raw stderr.
     if ! curl -fL --retry 3 -o "$dest.part" "$url"; then
       log "ERROR: failed to download $url"
       rm -f "$dest.part"
@@ -126,10 +105,8 @@ need_cmd() {
 }
 
 version_ge() {
-  # Numeric, dot-component comparison: prints "ge" if $1 >= $2, else "lt".
-  # Done by hand in awk (a POSIX-standard tool) rather than via `sort -V`,
-  # which is a GNU extension not guaranteed present on every platform
-  # (notably older macOS/BSD sort).
+  # Numeric dot-component comparison ("ge"/"lt"); done in awk since
+  # `sort -V` is a GNU extension not present on every platform.
   awk -v a="$1" -v b="$2" '
     BEGIN {
       na = split(a, va, ".");
@@ -147,11 +124,8 @@ version_ge() {
 }
 
 ecl_config_prefix() {
-  # ecl-config has no --prefix option (see its own --help output); the
-  # only place it exposes the install prefix is the "-I<prefix>/include"
-  # entry in its --cflags output. Used only to locate a *system* ECL's
-  # bin/ecl in Stage 1 below -- a vendor-built ECL's prefix is already
-  # known ($ECL_PREFIX under tools/build).
+  # ecl-config has no --prefix; derive it from the "-I<prefix>/include" in
+  # --cflags. Used only to locate a system ECL's bin/ecl.
   incdir=""
   for tok in $("$1" --cflags 2>/dev/null); do
     case "$tok" in
@@ -165,13 +139,9 @@ ecl_config_prefix() {
 }
 
 ecl_config_libdir() {
-  # Likewise, the "-L<libdir>" entry in ecl-config's --libs output is
-  # where its shared library actually lives -- more reliable than
-  # assuming <prefix>/lib, since e.g. Debian/Ubuntu's packaged ECL keeps
-  # libecl.so* (and its ecl-<version>/ support directory) under a
-  # multiarch subdirectory such as <prefix>/lib/x86_64-linux-gnu/ while
-  # its headers stay directly under <prefix>/include. Used, like
-  # ecl_config_prefix() above, only for a system ECL in Stage 3.
+  # The "-L<libdir>" in --libs is more reliable than <prefix>/lib (e.g.
+  # Debian/Ubuntu keeps libecl.so* under a multiarch subdir). System ECL
+  # only.
   libdir=""
   for tok in $("$1" --libs 2>/dev/null); do
     case "$tok" in
@@ -193,16 +163,12 @@ need_cmd tar
 
 REBUILD="${MAXIMA_R_REBUILD:-false}"
 
-# --- Stage 0: detect a usable system ECL --------------------------------
+# --- Detect a usable system ECL -------------------------------------------
 #
-# Skips Stage 1's build-from-source when a compatible ECL is already
-# installed (see the CRAN Repository Policy note at the top of this
-# file). ECL does not promise compatibility across major versions, so
-# "compatible" here is defined as: same major version component as the
-# pinned $ECL_VERSION, and a version number >= it. This only decides
-# whether Stage 1 builds ECL -- the system ECL's files are still copied
-# into inst/ in Stage 3 below exactly as a vendor-built ECL's would be,
-# so nothing about how the package loads ECL at runtime changes.
+# "Compatible" means same major version as the pinned $ECL_VERSION, and
+# >= it. Only decides whether ECL is built from source below -- either way
+# its files are copied into inst/ the same way, so runtime behaviour
+# (R/boot.R always loads a package-shipped ECL) is unaffected.
 USE_SYSTEM_ECL=false
 if [ "${MAXIMA_R_FORCE_VENDOR:-false}" != "true" ] \
    && command -v ecl-config >/dev/null 2>&1 && command -v ecl >/dev/null 2>&1; then
@@ -232,7 +198,7 @@ if [ "${MAXIMA_R_FORCE_VENDOR:-false}" != "true" ] \
   fi
 fi
 
-# --- Stage 1: ECL ------------------------------------------------------
+# --- Build ECL -------------------------------------------------------------
 
 if [ "$USE_SYSTEM_ECL" = "true" ]; then
   log "using system ECL $SYS_ECL_VERSION ($SYS_ECL_PREFIX), skipping vendored build"
@@ -255,26 +221,57 @@ else
     log "extracting ECL source"
     tar -xzf "$ECL_TARBALL" -C "$SRC_DIR/ecl-$ECL_VERSION" --strip-components=1
 
+    # Unused legacy MSVC build of GMP; its CRLF line endings otherwise
+    # trip R CMD check's "line endings in Makefiles" WARNING.
+    rm -rf "$SRC_DIR/ecl-$ECL_VERSION/msvc"
+
+    # ECL 21.2.1's configure predates Apple Silicon: on non-i386/x86_64
+    # Macs it assumes 32-bit PowerPC and forces GMP's ABI to "long", which
+    # the vendored (also pre-AArch64) GMP rejects on real arm64. Patch it
+    # to route arm64/aarch64 into the same generic, assembly-free "none"
+    # GMP build already used for Intel-Mac porting gaps -- slower, but
+    # correct (verified by building the vendored GMP this way under a
+    # faked arm64 Darwin host). Fails loudly if a future ECL_VERSION bump
+    # changes the code this patch targets.
+    ECL_CONFIGURE_SRC="$SRC_DIR/ecl-$ECL_VERSION/src/configure"
+    if ! grep -q 'arm64\*|aarch64\*)' "$ECL_CONFIGURE_SRC"; then
+      log "patching ECL's configure for Apple Silicon (arm64) GMP support"
+      sed -f - "$ECL_CONFIGURE_SRC" > "$ECL_CONFIGURE_SRC.tmp" <<'SED_EOF'
+/^                i386\*|x86_64) gmp_build=none-apple-\${host_os};;$/{
+a\
+                arm64*|aarch64*) gmp_build=none-apple-${host_os}; gmp_host=none-apple-${host_os}; ABI=32;;
+}
+/^  if test -z "\$gmp_build"; then$/{
+i\
+  if test -z "$gmp_host"; then\
+    gmp_host="${host_alias}"\
+  fi
+}
+s/^     --libdir=\${destdir} --build=\${gmp_build} --host=\${host_alias} \\$/     --libdir=${destdir} --build=${gmp_build} --host=${gmp_host} \\/
+SED_EOF
+      mv "$ECL_CONFIGURE_SRC.tmp" "$ECL_CONFIGURE_SRC"
+      if ! grep -q 'arm64\*|aarch64\*)' "$ECL_CONFIGURE_SRC"; then
+        log "ERROR: failed to patch ECL's configure for Apple Silicon support"
+        log "  (ECL_VERSION may have changed the code this patch targets)"
+        exit 1
+      fi
+    fi
+
     log "configuring ECL (this vendors GMP, Boehm-GC and libffi -- no system"
     log "  Lisp, bignum, GC or FFI library is required)"
     (
       cd "$SRC_DIR/ecl-$ECL_VERSION"
-      # --with-fpe=no: ECL's default build traps hardware floating-point
-      # exceptions (SIGFPE) and turns them into Lisp conditions. That's fine
-      # standalone, but embedded inside R's process this reliably produced a
-      # spurious FLOATING-POINT-INVALID-OPERATION during Maxima's own
-      # startup (root cause not fully isolated -- plausibly FPU state left
-      # behind by R itself or a BLAS it loaded; confirmed empirically not to
-      # depend on MAXIMA_PREFIX/MAXIMA_USERDIR). Maxima's own error
-      # reporting (merror) does its own explicit checks rather than relying
-      # on hardware traps -- see mx_eval_maxima's design notes -- so
-      # disabling this is a correctness fix, not a feature loss: floating
-      # point then behaves with ordinary silent-Inf/NaN IEEE-754 semantics,
-      # consistent with R's own.
+      # --with-fpe=no: ECL's SIGFPE trap-to-condition otherwise raises a
+      # spurious FLOATING-POINT-INVALID-OPERATION during Maxima's startup
+      # inside R's process. Maxima's own error reporting doesn't rely on
+      # hardware traps, so this is a correctness fix, not a feature loss.
+      # -w: silences vendored ECL/GMP/Boehm-GC/libffi's own upstream
+      # warnings, which R CMD check's as-cran install step would otherwise
+      # flag as a WARNING under this package's error-on-warning CI policy.
       ./configure --prefix="$ECL_PREFIX" --enable-threads=yes \
         --enable-gmp=included --enable-boehm=included --with-dffi=included \
         --with-fpe=no \
-        CFLAGS="-fPIC -O2"
+        CFLAGS="-fPIC -O2 -w"
       log "building ECL (this can take a few minutes)"
       make -j"$(ncpus)"
       make install
@@ -287,35 +284,14 @@ else
   ECL_LIBDIR="$ECL_PREFIX/lib"
 fi
 
-# --- Stage 2: Maxima, built against the ECL from stage 1 ---------------
+# --- Build Maxima against that ECL ------------------------------------------
 #
-# Unlike ECL above, Maxima has no "use it if already installed" check --
-# deliberately, not because CRAN Repository Policy's "first look to see
-# if it is already installed" request was overlooked. It doesn't apply
-# here because no system Maxima, however it was itself installed, can
-# satisfy what this package actually needs from a Maxima build, for two
-# independent reasons:
-#
-#   1. What this package loads at runtime is not a working `maxima`
-#      executable but the internal binary-ecl/maxima.fas combined fasl
-#      bundle from Maxima's own *build tree*. `make install` never ships
-#      that file -- it ships only the final linked binary-ecl/maxima
-#      program built from it -- so even a from-source, ECL-based, same-
-#      version system install discards the one artifact this package
-#      needs before this script could ever reach it (see inst/NOTES.md,
-#      "Maxima's ECL build doesn't install its combined fasl", for the
-#      build-system detail of where/how that fasl is produced).
-#   2. That artifact only exists at all when Maxima is built against
-#      ECL. A packaged/distro Maxima essentially never is -- SBCL and
-#      GCL are the common upstream choices -- so even setting aside (1),
-#      the Lisp files a typical system Maxima package ships wouldn't be
-#      loadable by this package's embedded ECL in the first place.
-#
-# A "check for a system Maxima" step, unlike Stage 0's for ECL, would
-# therefore have nothing to succeed against on the overwhelming majority
-# of systems, and could never fully replace this stage even when it did.
-# Building Maxima from source unconditionally is that conclusion, not a
-# gap in this script.
+# No "use system Maxima" fast path, unlike ECL above: this package needs
+# the internal binary-ecl/maxima.fas fasl from Maxima's *build tree*, which
+# `make install` never ships (see inst/NOTES.md); and that fasl only
+# exists when Maxima is built against ECL, which a packaged/distro Maxima
+# essentially never is (SBCL/GCL are the common choices). A system-Maxima
+# check would have nothing to succeed against either way.
 
 MAXIMA_STAMP="$STAMP_DIR/maxima-$MAXIMA_VERSION"
 if [ "$REBUILD" != "true" ] && [ -f "$MAXIMA_STAMP" ] && [ -d "$MAXIMA_PREFIX" ]; then
@@ -328,11 +304,9 @@ else
   rm -rf "$SRC_DIR/maxima-$MAXIMA_VERSION" "$MAXIMA_PREFIX"
   mkdir -p "$SRC_DIR/maxima-$MAXIMA_VERSION"
   log "extracting Maxima source"
-  # NOTE: extract fresh from the tarball (rather than copying a previously
-  # extracted tree) so that autotools-generated files keep mtimes older than
-  # their Makefile.am/configure.ac inputs -- otherwise automake tries (and,
-  # lacking the exact autotools version Maxima was released with, fails) to
-  # regenerate them.
+  # Extract fresh (not copied) so autotools-generated files keep mtimes
+  # older than their .am/configure.ac inputs -- otherwise automake tries
+  # (and, lacking the exact autotools version, fails) to regenerate them.
   tar -xzf "$MAXIMA_TARBALL" -C "$SRC_DIR/maxima-$MAXIMA_VERSION" --strip-components=1
 
   log "configuring Maxima against the vendored ECL"
@@ -349,30 +323,21 @@ else
   touch "$MAXIMA_STAMP"
 fi
 
-# --- Stage 3: stage vendored runtime files under inst/ ------------------
+# --- Install vendored runtime files under inst/ -----------------------------
 
 log "staging vendored ECL + Maxima runtime files under inst/"
 rm -rf "$INST_LIBS_DIR" "$INST_ECL_SUPPORT_DIR" "$INST_MAXIMA_CORE_DIR"
 mkdir -p "$INST_LIBS_DIR" "$INST_ECL_SUPPORT_DIR"
 
-# libecl's shared library (+ soname symlinks), copied beside the package's
-# own compiled object so a same-directory rpath (set in src/Makevars
-# below) finds it at runtime, wherever R ultimately installs the package.
-# Libtool names this libecl.so* on Linux/ELF but libecl*.dylib on
-# Darwin/macOS -- copy whichever pattern is actually present. (An
-# unmatched glob is left as a literal, non-existent path by POSIX sh, so
-# `[ -e "$f" ]` below correctly skips it without needing nullglob.)
+# libecl's shared library, copied beside this package's own compiled
+# object so a same-directory rpath (src/Makevars below) finds it at
+# runtime (Linux: libecl.so*; macOS: libecl*.dylib -- copy whichever
+# exists).
 #
-# Keep this a real, separately-updatable shared library, not a static
-# link: ECL is LGPL-licensed (see inst/COPYRIGHTS, item 3), and shipping
-# it this way -- linked at runtime, swappable in place without relinking
-# src/*.so -- is what keeps that comfortable for a GPL-2 R package to
-# embed. Switching src/Makevars to link libecl.a into this package's own
-# compiled object instead would trade that for a static link the LGPL
-# treats more strictly (it would need either relink-ability some other
-# way, e.g. shipped .o files, or the LGPL's explicit-permission carveout
-# for a GPL-compatible-licensed work). Don't make that switch, even for
-# portability/packaging convenience, without re-reading this constraint.
+# Kept as a real, swappable shared library rather than linked statically,
+# since ECL is LGPL (see inst/COPYRIGHTS #3): that's what keeps embedding
+# it comfortable for a GPL-2 R package. Don't switch src/Makevars to a
+# static link without re-reading that constraint.
 copied_libecl=false
 for f in "$ECL_LIBDIR"/libecl.so* "$ECL_LIBDIR"/libecl*.dylib; do
   if [ -e "$f" ]; then
@@ -386,23 +351,19 @@ if [ "$copied_libecl" != "true" ]; then
   exit 1
 fi
 
-# ECL's own Lisp-level support files (compiler, ASDF, ...), relocated via
-# the ECLDIR environment variable set in R/boot.R.
+# ECL's own Lisp support files (compiler, ASDF, ...), relocated via the
+# ECLDIR environment variable (see R/boot.R).
 ECL_SUPPORT_SRCDIR=$(find "$ECL_LIBDIR" -maxdepth 1 -type d -name 'ecl-*')
 cp -R "$ECL_SUPPORT_SRCDIR"/. "$INST_ECL_SUPPORT_DIR/"
 
-# The full Maxima install tree (bin/lib/share), relocated via the
-# MAXIMA_PREFIX environment variable set in R/boot.R. Its own internal
-# layout is left untouched since Maxima computes every other path relative
-# to this one root.
+# The full Maxima install tree, relocated via MAXIMA_PREFIX (see
+# R/boot.R); its own internal layout is untouched.
 cp -R "$MAXIMA_PREFIX" "$INST_MAXIMA_CORE_DIR"
 
-# `make install` only ships the final linked binary-ecl/maxima executable,
-# not the combined fasl bundle it's built from -- but that bundle (built
-# alongside it, from the very same object files, by maxima.system's
-# build-maxima-lib) is exactly what we need to `load` Maxima's compiled
-# code into our own already-booted ECL, rather than running it as a
-# separate standalone process. Only the build tree has it.
+# `make install` ships only the linked maxima executable, not the combined
+# fasl bundle it's built from -- but that fasl (from the build tree, same
+# object files) is what lets us load Maxima's compiled code into our own
+# already-booted ECL instead of running it as a separate process.
 MAXIMA_FAS="$SRC_DIR/maxima-$MAXIMA_VERSION/src/binary-ecl/maxima.fas"
 if [ ! -f "$MAXIMA_FAS" ]; then
   log "ERROR: expected $MAXIMA_FAS after building Maxima, but it's missing."
@@ -410,20 +371,16 @@ if [ ! -f "$MAXIMA_FAS" ]; then
 fi
 cp "$MAXIMA_FAS" "$INST_MAXIMA_CORE_DIR/maxima.fas"
 
-# --- Stage 4: generate src/Makevars -------------------------------------
+# --- Generate src/Makevars ---------------------------------------------------
 
 log "generating src/Makevars"
 ECL_CFLAGS=$("$ECL_CONFIG" --cflags)
 ECL_LIBS=$("$ECL_CONFIG" --libs)
 
-# $ORIGIN is a GNU-ld/ELF-only rpath token meaning "the directory holding
-# this object"; Darwin's ld64 has no $ORIGIN and uses @loader_path for the
-# same purpose instead. RPATH_TOKEN is a plain shell variable here (no
-# backslashes), so the heredoc's own variable substitution below inserts
-# its value as-is; the doubled '$$' in the Linux case is Make's own
-# escaping for a literal single '$' (this file is read by Make, not just
-# the shell), matching the quoting the line already used before this was
-# made platform-conditional.
+# $ORIGIN (GNU ld/ELF rpath token for "this object's directory") has no
+# Darwin equivalent -- ld64 uses @loader_path instead. The doubled '$$' in
+# the Linux case escapes Make's own '$' (Makevars is read by Make, not
+# just the shell).
 case "$(uname -s)" in
   Darwin) RPATH_TOKEN='@loader_path' ;;
   *) RPATH_TOKEN='$$ORIGIN' ;;

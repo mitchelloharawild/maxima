@@ -28,9 +28,8 @@ cl_object mx_maxima_symbol(const std::string &name) {
 
 cl_object mx_number_from_double(double x, bool is_integer) {
   if (is_integer) {
-    // ecl_make_integer takes a (signed) fixnum-range C long; values from R
-    // integers always fit, R doubles that merely look whole are routed
-    // through the double-float branch below instead.
+    // R integers always fit a fixnum; integer-valued doubles use the
+    // float branch below instead.
     return ecl_make_integer(static_cast<cl_fixnum>(x));
   }
   return ecl_make_double_float(x);
@@ -67,12 +66,7 @@ struct OpEntry {
   const char *r_op;
   const char *maxima_head;
 };
-// Maxima's core arithmetic/relational forms -- a small fixed table, not
-// something computed at runtime (see design notes). mplus/mtimes/mexpt/
-// mequal/mquotient are verified against a live build of this package's
-// vendored Maxima; the comparison operators follow the same, long-stable
-// Maxima internal naming (see e.g. its "Introduction to Types" internals
-// documentation).
+// Maxima's core arithmetic/relational forms -- a small fixed table.
 constexpr std::array<OpEntry, 10> kOps{{
     {"+", "MPLUS"},
     {"*", "MTIMES"},
@@ -106,9 +100,8 @@ cl_object mx_build_call(cl_object head_symbol, cl_object args_list) {
 
 namespace {
 
-// Reverse of kOps above: a Maxima core head name (e.g. "MPLUS") back to
-// the R operator that builds it (e.g. "+"). Returns "" if `head` isn't
-// one of these.
+// Reverse of kOps: a Maxima core head name back to its R operator ("" if
+// none).
 std::string mx_head_name_to_r_op(const std::string &head) {
   for (const auto &e : kOps) {
     if (head == e.maxima_head) return e.r_op;
@@ -116,22 +109,16 @@ std::string mx_head_name_to_r_op(const std::string &head) {
   return "";
 }
 
-// A Lisp symbol's own print-name (e.g. "$X", "%PI", "MPLUS"), as a plain
-// std::string -- the ordinary Lisp name, not any R-facing form yet.
+// A Lisp symbol's print-name (e.g. "$X", "%PI", "MPLUS") as a plain
+// string.
 std::string mx_symbol_print_name(cl_object sym) {
   cl_object name = ecl_symbol_name(sym);
   cl_object base = cl_coerce(name, ecl_make_symbol("SIMPLE-BASE-STRING", "CL"));
   return std::string(ecl_base_string_pointer_safe(base));
 }
 
-// A Maxima number (exact integer, ratio, or float) as an R atom. Like
-// as.double.mx_expr(), everything numeric becomes a plain R double --
-// there's no exact-rational R type to hold a ratio directly, and R's own
-// deparser already prints a whole-valued double without a trailing
-// ".0" (matching mx_expr_to_string()'s output, e.g. "x^2+1" rather than
-// "x^2.0+1.0"), so this doesn't cost the readability that motivated
-// as_mx_expr.numeric()'s integer/float distinction going the other way.
-// A ratio becomes an R `/` call over its numerator/denominator instead.
+// A Maxima number as an R double; a ratio becomes an R `/` call instead
+// (no exact-rational R type to hold it directly).
 cpp11::sexp mx_number_to_r(cl_object x, cl_type t) {
   if (t == t_ratio) {
     cpp11::sexp num = mx_expr_to_r(x->ratio.num);
@@ -141,30 +128,19 @@ cpp11::sexp mx_number_to_r(cl_object x, cl_type t) {
   return cpp11::sexp(Rf_ScalarReal(ecl_to_double(x)));
 }
 
-// A Maxima symbol as an R symbol or, for a handful of core constants and
-// booleans that have a direct R equivalent, that equivalent instead. As
-// bounded and fixed a set as kOps above, for the same reason: these are
-// core Maxima forms (read specially by Maxima's own reader), not ordinary
-// "$"-prefixed functions/variables mx_call()/mx_symbol() could otherwise
-// reach generically.
+// A Maxima symbol as an R symbol, or its R equivalent for the small fixed
+// set of core constants/booleans that have one.
 cpp11::sexp mx_symbol_to_r(cl_object sym) {
-  // Some Maxima predicate functions (is(), like(), ...) return the
-  // underlying Lisp T directly rather than Maxima's own $TRUE -- Maxima's
-  // own printer treats this the same as $TRUE (mstring(is(1=1)) is
-  // "true", not "T"), so this does too. Lisp NIL, the other half of that
-  // pair, is handled once at the top of mx_expr_to_r() instead (it's
-  // Cnil, not a t_symbol -- see there).
+  // Some Maxima predicates (is(), like(), ...) return Lisp T directly for
+  // true rather than $TRUE; Maxima's own printer treats them the same.
   if (sym == ECL_T) return cpp11::sexp(Rf_ScalarLogical(TRUE));
 
   std::string name = mx_symbol_print_name(sym);
 
   if (name == "$TRUE") return cpp11::sexp(Rf_ScalarLogical(TRUE));
   if (name == "$FALSE") return cpp11::sexp(Rf_ScalarLogical(FALSE));
-  // Maxima's own reader interns these three constants as ordinary "$"-
-  // prefixed symbols despite their "%"-looking surface syntax -- their
-  // print-name (what mx_symbol_print_name() returns) is "$%E"/"$%PI"/
-  // "$%I", not "%E"/"%PI"/"%I" -- verified against a live build of this
-  // package's vendored Maxima.
+  // Maxima's reader interns these as "$"-prefixed despite their "%"
+  // surface syntax.
   if (name == "$%E") return cpp11::sexp(Rf_lang2(Rf_install("exp"), Rf_ScalarReal(1.0)));
   if (name == "$%PI") return cpp11::sexp(Rf_install("pi"));
   if (name == "$%I") {
@@ -174,11 +150,8 @@ cpp11::sexp mx_symbol_to_r(cl_object sym) {
     return cpp11::sexp(Rf_ScalarComplex(z));
   }
 
-  // An ordinary "$"-prefixed user symbol (mx_symbol()'s own output) or a
-  // "%"-prefixed constant this table doesn't special-case: strip the
-  // marker and lower-case the rest -- Maxima's own printer does the same
-  // (see mx_expr_to_string()/mstring()), and mx_symbol() upper-cases on
-  // the way in, so this is the only direction that round-trips.
+  // An ordinary "$"/"%"-prefixed symbol: strip the marker and lower-case
+  // (mx_symbol() upper-cases going in, so this round-trips).
   std::string bare = name;
   if (!bare.empty() && (bare[0] == '$' || bare[0] == '%')) {
     bare = bare.substr(1);
@@ -186,7 +159,7 @@ cpp11::sexp mx_symbol_to_r(cl_object sym) {
   return cpp11::sexp(Rf_install(to_lower(bare).c_str()));
 }
 
-// Builds an ordinary (arbitrary-arity) R call `fname(args...)`.
+// Builds an ordinary R call fname(args...).
 cpp11::sexp mx_build_r_call(const std::string &fname, const std::vector<cpp11::sexp> &args) {
   cpp11::sexp tail(R_NilValue);
   for (auto it = args.rbegin(); it != args.rend(); ++it) {
@@ -195,9 +168,8 @@ cpp11::sexp mx_build_r_call(const std::string &fname, const std::vector<cpp11::s
   return cpp11::sexp(Rf_lcons(Rf_install(fname.c_str()), tail));
 }
 
-// Folds a (possibly n-ary, e.g. a flattened Maxima sum/product) argument
-// list left-associatively into nested binary R calls -- R's own +, *,
-// etc. are strictly unary/binary, unlike Maxima's internal mplus/mtimes.
+// Folds an n-ary argument list left-associatively into nested binary R
+// calls (R's own +, *, etc. are strictly unary/binary).
 cpp11::sexp mx_fold_r_op(const std::string &op, const std::vector<cpp11::sexp> &args) {
   if (args.empty()) {
     cpp11::stop("Maxima's internal '%s' form has no arguments", op.c_str());
@@ -209,11 +181,8 @@ cpp11::sexp mx_fold_r_op(const std::string &op, const std::vector<cpp11::sexp> &
   return acc;
 }
 
-// A compound Maxima expression `((HEAD ...props) arg1 arg2 ...)` (see
-// mx_build_call()) as an R call: a core arithmetic/relational head folds
-// into the matching R operator; MLIST (Maxima's own list form) becomes
-// R's list(); anything else "$"-prefixed is an ordinary function call,
-// reached the same generic way mx_call() reaches it going the other way.
+// A compound Maxima expression `((HEAD ...props) arg1 arg2 ...)` as an R
+// call.
 cpp11::sexp mx_call_to_r(cl_object x) {
   cl_object head_sym = cl_car(cl_car(x));
   std::string head_name = mx_symbol_print_name(head_sym);
@@ -224,22 +193,17 @@ cpp11::sexp mx_call_to_r(cl_object x) {
   }
 
   if (!head_name.empty() && (head_name[0] == '$' || head_name[0] == '%')) {
-    // "$"-prefixed: an ordinary user-level function call (mx_call()'s own
-    // output). "%"-prefixed: one of Maxima's built-in special functions
-    // (sin, cos, log, ...) -- despite being called as e.g. mx_call("sin",
-    // x) (which builds a "$SIN" form), Maxima's simplifier canonicalises
-    // these to its own internal "%SIN"-style head in the result; treated
-    // the same generic way here.
+    // "$": an ordinary user-level call. "%": one of Maxima's built-in
+    // specials (sin, cos, log, ...), canonicalised to this form by its
+    // simplifier.
     return mx_build_r_call(to_lower(head_name.substr(1)), args);
   }
   if (head_name == "MLIST") {
     return mx_build_r_call("list", args);
   }
   if (head_name == "RAT") {
-    // A rational coefficient inside an already-simplified expression
-    // (e.g. the 1/3 in "x^3/3") is this core form, not a plain ratio
-    // atom (see mx_number_to_r()) -- same fixed-arity args, same R `/`
-    // call either way.
+    // A rational coefficient inside an expression (e.g. the 1/3 in
+    // "x^3/3"); same R `/` call as a plain ratio atom.
     return mx_fold_r_op("/", args);
   }
   std::string r_op = mx_head_name_to_r_op(head_name);
@@ -256,12 +220,7 @@ cpp11::sexp mx_call_to_r(cl_object x) {
 } // namespace
 
 cpp11::sexp mx_expr_to_r(cl_object x) {
-  // The other half of the T/NIL pair mx_symbol_to_r() handles: some
-  // Maxima predicate functions return Lisp NIL directly for false
-  // (mstring() agrees -- it prints such a result as "false", the same as
-  // $FALSE). Maxima's own empty list is never bare NIL at this level (it
-  // is always wrapped, e.g. `((MLIST))`), so this can't be confused with
-  // one.
+  // Some Maxima predicates return Lisp NIL directly for false.
   if (Null(x)) {
     return cpp11::sexp(Rf_ScalarLogical(FALSE));
   }

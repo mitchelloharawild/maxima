@@ -119,7 +119,7 @@ tree is discarded.
 ## Windows build (configure.win)
 
 `configure.win` (and `cleanup.win`) add Windows support, mirroring
-`./configure`'s four stages against Rtools' MSYS2/mingw-w64 toolchain.
+`./configure`'s structure against Rtools' MSYS2/mingw-w64 toolchain.
 **This has not been exercised on a real Windows machine** -- it was
 written without one available to build and iterate against, so treat it
 as a first draft to debug against, not a working implementation. If/when
@@ -146,14 +146,14 @@ likely each is to be the actual problem:
   install step sweeps every `*.dll` left there into `libs/<arch>/`
   alongside this package's own compiled DLL -- the directory Windows
   searches first when loading it, the same role `$ORIGIN`/rpath plays on
-  Unix (see `./configure`'s Stage 3 and 4 comments, and the LGPL
-  reasoning there for why this has to be a real runtime DLL rather than
-  something statically linked in). If the package loads but `mx_start()`
-  fails to find/load libecl, check (a) that this sweep-into-libs/
-  behaviour is real and still current per "Writing R Extensions", and
-  (b) that the DLL actually landed in `src/` before `R CMD INSTALL`'s
-  Windows packaging step ran (i.e. that configure.win's Stage 3 ran
-  before that point, not after).
+  Unix (see `./configure`'s comments on installing runtime files and
+  generating Makevars, and the LGPL reasoning there for why this has to
+  be a real runtime DLL rather than something statically linked in). If
+  the package loads but `mx_start()` fails to find/load libecl, check (a)
+  that this sweep-into-libs/ behaviour is real and still current per
+  "Writing R Extensions", and (b) that the DLL actually landed in `src/`
+  before `R CMD INSTALL`'s Windows packaging step ran (i.e. that
+  configure.win's runtime-staging step ran before that point, not after).
 * **ECL threads on mingw-w64.** Built with `--enable-threads=yes`, same
   as Unix. If ECL's own configure/build has rough edges here on Windows,
   the first thing to try is dropping to `--enable-threads=no` (which
