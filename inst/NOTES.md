@@ -319,6 +319,26 @@ Confirmed via a real Windows CI run: with just the GMP fix above, the
 build got measurably further (8 minutes vs. ~3) before dying here,
 which is what "past the GMP fix" above is based on.
 
+## Windows: gcc 14 hard-errors on -Wint-conversion too, in ECL's own code
+
+Next run past the `bool`/C23 fix above (445s this time, i.e. genuinely
+deep into ECL's own C sources, not the earlier vintage-GMP-conftest or
+dpp-tool failures): died compiling `src/c/ffi/mmap.c` --
+`error: assignment to 'cl_object' ... from 'cl_index' ... makes pointer
+from integer without a cast [-Wint-conversion]`. Same class of problem,
+again: old C code assigning between an integer and a `cl_object`
+pointer without a cast, harmless under the implicit conversions
+pre-C23-tightening compilers allowed, but gcc 14 (confirmed: unaffected
+by `-std=gnu11`, same as `-Wimplicit-function-declaration`/
+`-Wimplicit-int` above -- this whole family of C-strictness tightening
+is a GCC-*version* default, not a dialect one) now hard-errors on it.
+Fixed by extending the same CFLAGS relaxation:
+`-Wno-error=int-conversion`. Pre-emptively added
+`-Wno-error=incompatible-pointer-types` alongside it too (same
+GCC-14-hardened diagnostic family per upstream's release notes, not yet
+individually confirmed to be hit) rather than spending another CI
+round-trip finding it separately if it is.
+
 ## Relocatability
 
 Both ECL and Maxima bake in the `--prefix` path they were built with, and

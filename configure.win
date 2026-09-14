@@ -340,11 +340,23 @@ SED_EOF
       # run: Rtools45's gcc defaults higher than C17 now. Pinning the
       # dialect keeps `bool` a plain identifier again, the same fix as
       # -std=gnu++14 for this package's own C++ below (src/Makevars.win).
+      # -Wno-error=int-conversion / -Wno-error=incompatible-pointer-types:
+      # ECL's own C code (not just GMP's) assigns between integers and
+      # `cl_object` pointers without a cast in a few places, e.g.
+      # src/c/ffi/mmap.c -- fine under the implicit conversions old C
+      # compilers allowed, but confirmed against a real Windows CI run
+      # that gcc 14 now hard-errors on -Wint-conversion too, unaffected
+      # by -std= (same as -Wimplicit-function-declaration/-Wimplicit-int
+      # above -- this is a GCC-version default, not a dialect one).
+      # -Wincompatible-pointer-types is the same class of gcc-14-hardened
+      # diagnostic and not yet confirmed to be hit, but pre-emptively
+      # relaxed here too rather than spending another CI round-trip on
+      # what upstream's own release notes list alongside int-conversion.
       ./configure --prefix="$ECL_PREFIX" --enable-threads=yes \
         --build=x86_64-w64-mingw32 --host=x86_64-w64-mingw32 \
         --enable-gmp=included --enable-boehm=included --with-dffi=included \
         --with-fpe=no \
-        CFLAGS="-O2 -w -std=gnu11 -Wno-error=implicit-function-declaration -Wno-error=implicit-int"
+        CFLAGS="-O2 -w -std=gnu11 -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=int-conversion -Wno-error=incompatible-pointer-types"
       log "building ECL (this can take a few minutes)"
       make -j"$(ncpus)"
       make install
