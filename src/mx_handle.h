@@ -2,6 +2,7 @@
 // cl_object (see ecl_embed.h).
 #pragma once
 
+#include "ecl_pthread_fix.h"
 #include <cpp11.hpp>
 #include "ecl_embed.h"
 

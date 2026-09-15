@@ -2,6 +2,7 @@
 // image Layer A booted.
 #pragma once
 
+#include "ecl_pthread_fix.h"
 #include <ecl/ecl.h>
 // See the identical note in ecl_embed.h.
 #undef CAR
