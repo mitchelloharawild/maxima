@@ -9,20 +9,65 @@ namespace {
 bool g_booted = false;
 
 // Signals ECL's boot installs handlers for; saved before cl_boot() and
-// restored after shutdown.
+// restored after shutdown. No SIGBUS on Windows -- it isn't a signal
+// there at all (no <sys/signal.h>-style bus-error delivery; Windows
+// reports the equivalent via SEH, which ECL's own boot handles
+// separately from this list).
+#ifdef _WIN32
+const int kSignals[] = {SIGSEGV, SIGINT, SIGFPE};
+#else
 const int kSignals[] = {SIGSEGV, SIGBUS, SIGINT, SIGFPE};
-struct sigaction g_saved[sizeof(kSignals) / sizeof(kSignals[0])];
+#endif
+constexpr size_t kNumSignals = sizeof(kSignals) / sizeof(kSignals[0]);
+
+#ifdef _WIN32
+// mingw's <csignal> only has the portable ISO C signal()/raise() pair --
+// no sigaction()/struct sigaction (a POSIX-only API this package's Unix
+// build otherwise uses to *read* the installed handler without changing
+// it). signal() only ever returns the *previous* handler as a side
+// effect of installing a new one, so peek it by swapping to SIG_DFL and
+// immediately back; this is the standard workaround where sigaction()
+// isn't available.
+using SigHandler = void (*)(int);
+SigHandler g_saved[kNumSignals];
 
 void save_signal_handlers() {
-  for (size_t i = 0; i < sizeof(kSignals) / sizeof(kSignals[0]); i++) {
+  for (size_t i = 0; i < kNumSignals; i++) {
+    SigHandler old = std::signal(kSignals[i], SIG_DFL);
+    std::signal(kSignals[i], old);
+    g_saved[i] = old;
+  }
+}
+
+void restore_signal_handlers() {
+  for (size_t i = 0; i < kNumSignals; i++) {
+    std::signal(kSignals[i], g_saved[i]);
+  }
+}
+#else
+struct sigaction g_saved[kNumSignals];
+
+void save_signal_handlers() {
+  for (size_t i = 0; i < kNumSignals; i++) {
     sigaction(kSignals[i], nullptr, &g_saved[i]);
   }
 }
 
 void restore_signal_handlers() {
-  for (size_t i = 0; i < sizeof(kSignals) / sizeof(kSignals[0]); i++) {
+  for (size_t i = 0; i < kNumSignals; i++) {
     sigaction(kSignals[i], &g_saved[i], nullptr);
   }
+}
+#endif
+
+// setenv(3) isn't on Windows; _putenv_s is mingw/MSVC's equivalent
+// (always overwrites, so no separate "overwrite" argument to pass).
+void set_env(const char *name, const char *value) {
+#ifdef _WIN32
+  _putenv_s(name, value);
+#else
+  setenv(name, value, 1);
+#endif
 }
 
 // Root of the GC-protection table: a hash table bound to a global ECL
@@ -65,14 +110,14 @@ void mx_boot(const std::string &ecl_dir, const std::string &maxima_prefix,
 
   // Repoints ECL/Maxima's baked-in --prefix paths (see configure) at
   // wherever this package's vendored copies actually ended up installed.
-  if (!ecl_dir.empty()) setenv("ECLDIR", ecl_dir.c_str(), 1);
-  if (!maxima_prefix.empty()) setenv("MAXIMA_PREFIX", maxima_prefix.c_str(), 1);
-  if (!maxima_userdir.empty()) setenv("MAXIMA_USERDIR", maxima_userdir.c_str(), 1);
+  if (!ecl_dir.empty()) set_env("ECLDIR", ecl_dir.c_str());
+  if (!maxima_prefix.empty()) set_env("MAXIMA_PREFIX", maxima_prefix.c_str());
+  if (!maxima_userdir.empty()) set_env("MAXIMA_USERDIR", maxima_userdir.c_str());
 
-  // Save the host's handlers for mx_shutdown() to restore, but leave ECL's
-  // own SIGFPE/SIGSEGV/SIGBUS handlers in place while it's booted -- its
-  // runtime depends on them (e.g. turning an FP trap into a Lisp
-  // condition instead of crashing).
+  // Save the host's handlers for mx_shutdown() to restore, but leave
+  // ECL's own handlers for the signals above in place while it's
+  // booted -- its runtime depends on them (e.g. turning an FP trap into
+  // a Lisp condition instead of crashing).
   save_signal_handlers();
   char arg0[] = "maxima";
   char *argv[] = {arg0};

@@ -6,6 +6,7 @@
 // convert.h (Layer B).
 #pragma once
 
+#include "ecl_pthread_fix.h"
 #include <ecl/ecl.h>
 // ECL's CAR/CDR/CONS macros collide with R's; undefine them so whichever
 // of R's/cpp11's headers comes next wins. Use ecl_cons()/cl_car()/cl_cdr()

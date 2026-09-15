@@ -222,10 +222,16 @@ if [ "$USE_SYSTEM_ECL" = "true" ]; then
   ECL_BIN="$SYS_ECL_BIN"
   ECL_CONFIG="$SYS_ECL_CONFIG"
   ECL_LIBDIR="$SYS_ECL_LIBDIR"
+  ECL_BINDIR="$SYS_ECL_PREFIX/bin"
 else
   ECL_STAMP="$STAMP_DIR/ecl-$ECL_VERSION"
+  # flatinstall (see the matching comment below, where ECL_BIN is set
+  # for this branch) means the built exe lands directly in $ECL_PREFIX,
+  # not $ECL_PREFIX/bin -- checked here too so a cache hit on
+  # tools/build is actually recognized as "already built" instead of
+  # needlessly rebuilding every run.
   if [ "$REBUILD" != "true" ] && [ -f "$ECL_STAMP" ] \
-     && { [ -x "$ECL_PREFIX/bin/ecl.exe" ] || [ -x "$ECL_PREFIX/bin/ecl" ]; }; then
+     && { [ -x "$ECL_PREFIX/ecl.exe" ] || [ -x "$ECL_PREFIX/ecl" ]; }; then
     log "ECL $ECL_VERSION already built, skipping (MAXIMA_R_REBUILD=true to force)"
   else
     ECL_TARBALL="$DL_DIR/ecl-$ECL_VERSION.tar.gz"
@@ -240,6 +246,267 @@ else
     # See ./configure's matching comment: unused legacy MSVC build of GMP,
     # whose CRLF line endings otherwise trip R CMD check.
     rm -rf "$SRC_DIR/ecl-$ECL_VERSION/msvc"
+
+    # With ABI=64 forced, the vendored GMP's x86_64 assembly assumes
+    # mp_limb_t is `unsigned long` -- true on every real 64-bit Unix
+    # (LP64) but not on Windows' LLP64 model, where `long` stays 32 bits
+    # even in 64-bit builds. GMP's own "checking size of mp_limb_t" then
+    # comes out 32, mismatching the 64 bits its x86_64 assembly expects:
+    # "Oops, mp_limb_t is 32 bits, but the assembler code in this
+    # configuration expects 64 bits." Confirmed first real run, on GitHub
+    # Actions' windows-latest/Rtools45: GMP's configure dies at exactly
+    # this check.
+    #
+    # ECL's own configure already routes x86_64 around this into GMP's
+    # portable, assembly-free "none" build (with_c_gmp=yes) for the
+    # cygwin* host case, with a comment about GMP being too old for
+    # Windows64 calling conventions -- but the mingw* case right below it
+    # never got the same fix. Tried first (a smaller patch, just setting
+    # with_c_gmp=yes the same way for mingw*'s x86_64) -- confirmed by a
+    # real CI run *not* to be sufficient: with_c_gmp only rewrites
+    # --build, and GMP picks its per-host assembly path from --host (see
+    # its `case $host in x86_64-*-*)`, matched against the *full* triple,
+    # not just the CPU field), which with_c_gmp leaves untouched at the
+    # real "x86_64-w64-mingw32" -- so the mismatch was unchanged.
+    #
+    # What actually avoids it: also override --host to a "none-..."
+    # pseudo-triple, so GMP's host_cpu genuinely reads "none" and its
+    # `none-*-*)` case (abilist "long"/"longlong", no assembly) matches
+    # instead -- the same "both --build and --host" fix already applied
+    # for Apple Silicon in ./configure, and for the same underlying
+    # reason (GMP assembly assumptions that don't hold for this host).
+    # ABI=longlong (rather than leaving $ABI unset, which lets GMP try
+    # "long" first and succeed) picks the "long long"-limbed option of
+    # that abilist explicitly: `long` is also only 32 bits on Windows, so
+    # leaving GMP to pick it left both `long` and `mp_limb_t` narrower
+    # than ECL's own 64-bit `cl_fixnum` -- confirmed by a third real CI
+    # run to trip ECL's own big.d build-time assertion, "#error ECL
+    # cannot build with GMP when both long and mp_limb_t are smaller than
+    # cl_fixnum". `long long` stays 64 bits under LLP64, satisfying it.
+    # ECL 21.2.1 hardcodes --host=${host_alias} for GMP's nested
+    # ./configure invocation; the second and third sed commands below add
+    # the same gmp_host indirection ./configure's Apple-Silicon patch
+    # adds, so setting gmp_host here actually reaches that invocation.
+    # Fails loudly if a future ECL_VERSION bump changes the code this
+    # patch targets.
+    ECL_CONFIGURE_SRC="$SRC_DIR/ecl-$ECL_VERSION/src/configure"
+    if ! grep -q 'maxima-r-mingw-gmp-c-fallback' "$ECL_CONFIGURE_SRC"; then
+      log "patching ECL's configure for mingw-w64 GMP support"
+      sed -f - "$ECL_CONFIGURE_SRC" > "$ECL_CONFIGURE_SRC.tmp" <<'SED_EOF'
+/^        mingw\*)$/{
+a\
+                if test "x$host_cpu" = "xx86_64"; then\
+                  # maxima-r-mingw-gmp-c-fallback: see configure.win\
+                  gmp_build=none-w64-mingw32; gmp_host=none-w64-mingw32; ABI=longlong\
+                fi
+}
+/^  if test -z "\$gmp_build"; then$/{
+i\
+  if test -z "$gmp_host"; then\
+    gmp_host="${host_alias}"\
+  fi
+}
+s/^     --libdir=\${destdir} --build=\${gmp_build} --host=\${host_alias} \\$/     --libdir=${destdir} --build=${gmp_build} --host=${gmp_host} \\/
+SED_EOF
+      chmod +x "$ECL_CONFIGURE_SRC.tmp"
+      mv "$ECL_CONFIGURE_SRC.tmp" "$ECL_CONFIGURE_SRC"
+      if ! grep -q 'maxima-r-mingw-gmp-c-fallback' "$ECL_CONFIGURE_SRC"; then
+        log "ERROR: failed to patch ECL's configure for mingw-w64 GMP support"
+        log "  (ECL_VERSION may have changed the code this patch targets)"
+        exit 1
+      fi
+    fi
+
+    # ECL's configure decides whether to use Windows-native paths
+    # (`pwd -W`, giving e.g. "D:/a/...") or POSIX ones (plain `pwd`,
+    # giving e.g. "/d/a/...") for `true_srcdir`/`true_builddir` -- baked
+    # verbatim into bare.lsp as the physical target of the "SRC:"/"SYS:"
+    # logical-pathname hosts ECL's own Lisp sources load through -- by
+    # grepping `uname -a` for "mingw", not by checking $host (which is
+    # reliably "x86_64-w64-mingw32" here, since configure.win passes
+    # --host explicitly). That's the wrong signal in exactly this
+    # package's build: R CMD INSTALL runs this under Rtools' base MSYS2
+    # bash (see the shell this whole script runs under), whose own
+    # `uname -a` doesn't contain "mingw" even though --host/--build both
+    # say mingw32 -- so it takes the POSIX-path branch regardless.
+    # Confirmed by a fourth real Windows CI run (GMP/ECL-bootstrap fixes
+    # above all worked -- this is the furthest yet, deep into building
+    # ecl_min.exe itself) that this is genuinely the failure: ecl_min.exe
+    # is a native Windows binary, and can't resolve an MSYS-style
+    # "/d/a/..." path via its own (mingw CRT) file I/O, so bare.lsp's
+    # first `(load "lsp/load.lsp" ...)` -- itself relying on the "SRC:"
+    # translation set up two lines above it -- fails outright:
+    # `FILE-ERROR ... (:PATHNAME #P"SRC:LSP;EXPORT.LSP.NEWEST")`.
+    # Patched to also take the Windows-native-path branch whenever $host
+    # itself says mingw, independent of what uname reports.
+    if ! grep -q 'maxima-r-mingw-true-srcdir-fallback' "$ECL_CONFIGURE_SRC"; then
+      log "patching ECL's configure for mingw-w64 true_srcdir/true_builddir"
+      sed -f - "$ECL_CONFIGURE_SRC" > "$ECL_CONFIGURE_SRC.tmp" <<'SED_EOF'
+/uname -a | grep -i 'mingw' > \/dev\/null; then/c\
+if uname -a | grep -i 'mingw' > /dev/null || echo "$host" | grep -qi 'mingw'; then # maxima-r-mingw-true-srcdir-fallback: see configure.win
+SED_EOF
+      chmod +x "$ECL_CONFIGURE_SRC.tmp"
+      mv "$ECL_CONFIGURE_SRC.tmp" "$ECL_CONFIGURE_SRC"
+      if ! grep -q 'maxima-r-mingw-true-srcdir-fallback' "$ECL_CONFIGURE_SRC"; then
+        log "ERROR: failed to patch ECL's configure for mingw-w64 true_srcdir/true_builddir"
+        log "  (ECL_VERSION may have changed the code this patch targets)"
+        exit 1
+      fi
+    fi
+
+    # ECL's own ecl/ecl.h declares pthread_t/pthread_mutex_t/
+    # pthread_cond_t itself (as bare HANDLE) whenever ECL_MS_WINDOWS_HOST
+    # + ECL_THREADS are both defined -- and ECL_THREADS can't be turned
+    # off to dodge that: ecl.h itself #errors "The Windows ports cannot
+    # be built without threads" if it isn't defined (confirmed the hard
+    # way -- a prior version of this patch tried --enable-threads=no,
+    # which turned out to be silently overridden by ECL's own configure
+    # regardless; patching *that* override out in turn just traded one
+    # real Windows CI failure for this #error, hit on the very next run).
+    # So threads must stay on, and this conflicts outright with
+    # winpthreads' real (unconditional, unguarded) typedefs of the same
+    # three names once this package's own C++ sources pull in
+    # <pthread.h> transitively in the same translation unit (cpp11.hpp
+    # -> <memory> -> libstdc++'s bits/gthr-default.h, since Rtools' g++
+    # is the "posix" thread-model variant) -- confirmed by a real
+    # Windows CI run: "conflicting declaration 'typedef void*
+    # pthread_t'" etc. against winpthreads' pthread.h.
+    #
+    # Neither header's typedefs are guarded against the other -- but
+    # winpthreads' pthread.h does have its own top-of-file include guard
+    # (WIN_PTHREADS_H, checked directly against its actual source, not
+    # guessed), defined once real pthread.h has been read at all. Since
+    # this package's own convert.h/mx_handle.h already include cpp11.hpp
+    # (and so, transitively, real pthread.h) before ecl/ecl.h -- an
+    # existing, deliberate ordering, see the comment in convert.h --
+    # WIN_PTHREADS_H is reliably already defined by the time ecl.h's own
+    # typedefs would run in exactly the files that need both headers.
+    # Skip ecl.h's own typedefs in that case: harmless, since ECL's own
+    # C build (pure C, no C++, no <memory>) never sees a real pthread.h
+    # and keeps declaring pthread_t as HANDLE as before, exactly as its
+    # own Win32-based thread implementation (built entirely separately,
+    # before this package's own C++ sources are ever compiled) needs;
+    # this package's own C++ code, on the other hand, never touches
+    # pthread_t/pthread_mutex_t/pthread_cond_t itself (checked directly
+    # -- grepped ecl_embed.cpp/maxima_call.cpp/convert.cpp), so it
+    # doesn't matter to it which of the two types it ends up seeing.
+    ECL_H="$SRC_DIR/ecl-$ECL_VERSION/src/h/ecl.h"
+    if ! grep -q 'maxima-r-mingw-pthread-guard' "$ECL_H"; then
+      log "patching ECL's ecl.h: skip its pthread_t et al if winpthreads' are"
+      log "  already in scope"
+      sed -f - "$ECL_H" > "$ECL_H.tmp" <<'SED_EOF'
+/^# ifdef ECL_THREADS$/,/^   typedef HANDLE pthread_cond_t; \/\*Dummy, not really used\*\/$/c\
+# ifdef ECL_THREADS\
+#  ifndef WIN_PTHREADS_H /* maxima-r-mingw-pthread-guard: see configure.win */\
+   typedef HANDLE pthread_t;\
+   typedef HANDLE pthread_mutex_t;\
+   typedef HANDLE pthread_cond_t; /*Dummy, not really used*/\
+#  endif
+SED_EOF
+      chmod +x "$ECL_H.tmp"
+      mv "$ECL_H.tmp" "$ECL_H"
+      if ! grep -q 'maxima-r-mingw-pthread-guard' "$ECL_H"; then
+        log "ERROR: failed to patch ECL's ecl.h to guard its pthread_t et al"
+        log "  (ECL_VERSION may have changed the code this patch targets)"
+        exit 1
+      fi
+    fi
+
+    # ECL's src/h/impl/math_fenv.h includes math_fenv_msvc.h -- a shim
+    # providing fenv_t/fesetenv/etc as macros, written for real MSVC,
+    # which historically lacked working C99 fenv.h support -- whenever
+    # ECL_MS_WINDOWS_HOST is defined, with no check for whether this is
+    # actually MSVC at all. It isn't, here: mingw-w64's CRT has a
+    # perfectly good <fenv.h> (confirmed via a real Windows CI run's own
+    # "checking for fenv.h... yes"), which math_fenv.h already includes
+    # correctly first -- so on mingw this shim loads *in addition*,
+    # right after, and promptly `#define fenv_t int`, silently
+    # rewriting every subsequent use of the token `fenv_t` (including
+    # ones inside libstdc++'s own <cfenv>, pulled in later by this
+    # package's own ecl_embed.cpp) to the literal text "int". Confirmed
+    # by a real Windows CI run: <cfenv>'s own declarations come out
+    # mangled ("expected ';' before 'int'"), and ecl_embed.cpp's
+    # std::fesetenv(FE_DFL_ENV) calls no longer typecheck against the
+    # real fesetenv() mingw's <fenv.h> declared moments before. Same
+    # class of bug as the SIGPIPE and pthread_t ones above: an ECL
+    # Windows-specific code path that assumes Windows == MSVC. Patches
+    # math_fenv.h's guard to also require _MSC_VER, so mingw builds rely
+    # solely on the real <fenv.h> already working for them.
+    MATH_FENV_H="$SRC_DIR/ecl-$ECL_VERSION/src/h/impl/math_fenv.h"
+    if ! grep -q 'maxima-r-mingw-no-msvc-fenv-shim' "$MATH_FENV_H"; then
+      log "patching ECL's math_fenv.h: the MSVC fenv shim must not load on mingw32"
+      sed -f - "$MATH_FENV_H" > "$MATH_FENV_H.tmp" <<'SED_EOF'
+s/^#if defined(ECL_MS_WINDOWS_HOST)$/#if defined(ECL_MS_WINDOWS_HOST) \&\& defined(_MSC_VER) \/* maxima-r-mingw-no-msvc-fenv-shim: see configure.win *\//
+SED_EOF
+      chmod +x "$MATH_FENV_H.tmp"
+      mv "$MATH_FENV_H.tmp" "$MATH_FENV_H"
+      if ! grep -q 'maxima-r-mingw-no-msvc-fenv-shim' "$MATH_FENV_H"; then
+        log "ERROR: failed to patch ECL's math_fenv.h to skip the MSVC shim on mingw32"
+        log "  (ECL_VERSION may have changed the code this patch targets)"
+        exit 1
+      fi
+    fi
+
+    # ECL's cmp:linker-cc (src/cmp/cmpmain.lsp) hands the linker driver
+    # (*ld*, normally the same gcc used to compile) one argument per
+    # object file being linked -- and per cmp:guess-ld-flags, *every*
+    # plain .o file being linked is passed this way, not just genuinely
+    # extra flags. Maxima's own link step (c::build-fasl/build-program
+    # in its src/maxima.system, called with :lisp-files bound to all
+    # ~900 of its compiled modules) hands linker-cc all ~900 of their
+    # absolute .o paths, well past Windows' ~32K-character CreateProcess
+    # command-line limit -- confirmed by a real Windows CI run: "Could
+    # not spawn subprocess to run \"x86_64-w64-mingw32-gcc\". ... The
+    # parameter is incorrect." (ERROR_INVALID_PARAMETER), raised from
+    # BUILD-MAXIMA-LIB while building Maxima itself, i.e. this is
+    # unrelated to (and downstream of) the SIGPIPE patch above. GCC and
+    # GNU ld both support reading arguments from an "@file" response
+    # file instead, so patch linker-cc to always route its argument
+    # list through one of those on mingw32 -- sidestepping the command
+    # line length limit regardless of how many files Maxima or any
+    # other package being cross-built here eventually grows to.
+    CMPMAIN_LISP="$SRC_DIR/ecl-$ECL_VERSION/src/cmp/cmpmain.lsp"
+    if ! grep -q 'maxima-r-mingw-link-response-file' "$CMPMAIN_LISP"; then
+      log "patching ECL's cmp:linker-cc to use a response file on mingw32"
+      # Anchored on "(declare (ignore type))", not "#-msvc" above it --
+      # #-msvc alone isn't unique in this file (it also guards
+      # dump-precompiled-header further down), and a sed range restarts
+      # at every match of its start pattern: anchoring there let this
+      # patch's range reopen at that second #-msvc with no closing
+      # match before EOF, silently deleting the rest of the file
+      # (dump-precompiled-header, ext:install-c-compiler, and the
+      # trailing (provide 'cmp)) -- caught by actually loading the
+      # patched file, not just eyeballing the diff. The signature line
+      # two above isn't unique either (the #+msvc linker-cc has the
+      # identical argument list), so this leaves that line and #-msvc
+      # untouched and only replaces the body from here down.
+      sed -f - "$CMPMAIN_LISP" > "$CMPMAIN_LISP.tmp" <<'SED_EOF'
+/^  (declare (ignore type))$/,/^     ,@ld-flags)))$/c\
+  (declare (ignore type))\
+  (let ((args `("-o" ,(brief-namestring o-pathname)\
+                ,(concatenate 'string "-L" (fix-for-mingw (ecl-library-directory)))\
+                ,@object-files\
+                ,@(and *ld-rpath* (list *ld-rpath*))\
+                ,@(split-program-options *user-ld-flags*)\
+                ,@ld-flags))\
+        (rsp nil))\
+    #+mingw32 ; maxima-r-mingw-link-response-file: see configure.win\
+    (when (setf rsp (si::mkstemp #P"TMP:ecl-link-args"))\
+      (with-open-file (s rsp :direction :output :if-exists :supersede)\
+        (dolist (a args) (format s "~S~%" a)))\
+      (setf args (list (concatenate 'string "@" (namestring rsp)))))\
+    (unwind-protect\
+         (safe-run-program *ld* args)\
+      (when rsp (ignore-errors (delete-file rsp))))))
+SED_EOF
+      chmod +x "$CMPMAIN_LISP.tmp"
+      mv "$CMPMAIN_LISP.tmp" "$CMPMAIN_LISP"
+      if ! grep -q 'maxima-r-mingw-link-response-file' "$CMPMAIN_LISP"; then
+        log "ERROR: failed to patch ECL's cmp:linker-cc for a mingw32 response file"
+        log "  (ECL_VERSION may have changed the code this patch targets)"
+        exit 1
+      fi
+    fi
 
     log "configuring ECL for mingw-w64 (this vendors GMP, Boehm-GC and"
     log "  libffi -- no system Lisp, bignum, GC or FFI library is required)"
@@ -270,11 +537,35 @@ else
       # above; without this, GMP's configure reports every ABI it tries
       # (64, then 32) as "no, long long reliability test 1" and gives up
       # with "could not find a working compiler".
+      # -std=gnu11: ECL's own build-time helper tool, src/c/dpp.c, has
+      # `typedef int bool;` for pre-C99 compilers lacking <stdbool.h>.
+      # C23 made `bool` a keyword (like C++ always had it), so a compiler
+      # now defaulting to C23 hard-errors on that typedef ("'bool' cannot
+      # be defined via 'typedef'") -- confirmed against a real Windows CI
+      # run: Rtools45's gcc defaults higher than C17 now. Pinning the
+      # dialect keeps `bool` a plain identifier again, the same fix as
+      # -std=gnu++14 for this package's own C++ below (src/Makevars.win).
+      # -Wno-error=int-conversion / -Wno-error=incompatible-pointer-types:
+      # ECL's own C code (not just GMP's) assigns between integers and
+      # `cl_object` pointers without a cast in a few places, e.g.
+      # src/c/ffi/mmap.c -- fine under the implicit conversions old C
+      # compilers allowed, but confirmed against a real Windows CI run
+      # that gcc 14 now hard-errors on -Wint-conversion too, unaffected
+      # by -std= (same as -Wimplicit-function-declaration/-Wimplicit-int
+      # above -- this is a GCC-version default, not a dialect one).
+      # -Wincompatible-pointer-types is the same class of gcc-14-hardened
+      # diagnostic and not yet confirmed to be hit, but pre-emptively
+      # relaxed here too rather than spending another CI round-trip on
+      # what upstream's own release notes list alongside int-conversion.
+      # --enable-threads=yes, same as Unix: ECL's Windows port hard-
+      # requires this (ecl/ecl.h #errors otherwise) -- see the pthread.h
+      # conflict this causes, and how it's actually resolved instead,
+      # in the ecl.h patch above.
       ./configure --prefix="$ECL_PREFIX" --enable-threads=yes \
         --build=x86_64-w64-mingw32 --host=x86_64-w64-mingw32 \
         --enable-gmp=included --enable-boehm=included --with-dffi=included \
         --with-fpe=no \
-        CFLAGS="-O2 -w -Wno-error=implicit-function-declaration -Wno-error=implicit-int"
+        CFLAGS="-O2 -w -std=gnu11 -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=int-conversion -Wno-error=incompatible-pointer-types"
       log "building ECL (this can take a few minutes)"
       make -j"$(ncpus)"
       make install
@@ -282,13 +573,28 @@ else
     touch "$ECL_STAMP"
   fi
 
-  if [ -x "$ECL_PREFIX/bin/ecl.exe" ]; then
-    ECL_BIN="$ECL_PREFIX/bin/ecl.exe"
+  # ECL's own configure hardcodes INSTALL_TARGET=flatinstall for mingw*
+  # (see its src/configure and inst/NOTES.md): plain `make install`
+  # above didn't use the usual bin/lib/include hierarchy this block
+  # assumed -- ECL's own top-level Makefile.in forwards `install` to
+  # `cd build; make $(INSTALL_TARGET)`, and flatinstall sets
+  # bindir=libdir=includedir=ecldir=$(prefix), installing everything
+  # (the exe, libecl*.dll, headers, and ECL's own Lisp support tree)
+  # directly into $ECL_PREFIX itself, with no subdirectories at all.
+  # Confirmed by a real Windows CI run: assuming bin/ here (as this
+  # block did before) silently produced a nonexistent --with-ecl path
+  # for Maxima's configure ("ecl executable .../bin/ecl not found in
+  # PATH", a non-fatal warning there) that only failed loudly once
+  # Maxima's own build actually tried to run it ("No such file or
+  # directory").
+  if [ -x "$ECL_PREFIX/ecl.exe" ]; then
+    ECL_BIN="$ECL_PREFIX/ecl.exe"
   else
-    ECL_BIN="$ECL_PREFIX/bin/ecl"
+    ECL_BIN="$ECL_PREFIX/ecl"
   fi
-  ECL_CONFIG="$ECL_PREFIX/bin/ecl-config"
-  ECL_LIBDIR="$ECL_PREFIX/lib"
+  ECL_CONFIG="$ECL_PREFIX/ecl-config"
+  ECL_LIBDIR="$ECL_PREFIX"
+  ECL_BINDIR="$ECL_PREFIX"
 fi
 
 # --- Build Maxima against that ECL ------------------------------------------
@@ -313,20 +619,111 @@ else
   log "extracting Maxima source"
   tar -xzf "$MAXIMA_TARBALL" -C "$SRC_DIR/maxima-$MAXIMA_VERSION" --strip-components=1
 
+  # ecl.exe needs to find its own Lisp modules (cmp.fas and friends) via
+  # the "SYS:" logical pathname host, which src/lsp/config.lsp.in sets
+  # up as `(merge-pathnames "**/*.*" (si::get-library-pathname))`.
+  # (si::get-library-pathname) is ECLDIR if set, else (on Windows)
+  # self-locates via GetModuleFileName("ecl.dll") -- and that
+  # self-location path (unlike a bare $ECLDIR) explicitly rebuilds the
+  # result through cl_make_pathname with :name/:type nil, i.e. forces
+  # it to be a proper *directory* pathname, not just any string that
+  # happens to name an existing directory. That distinction matters:
+  # merge-pathnames treats a defaults pathname with no trailing
+  # separator as ending in a *filename*, not a directory component --
+  # so a bare `.../tools/build/ecl` (no trailing slash, e.g. from `pwd
+  # -W`, which never adds one) merges as if the whole final "ecl"
+  # segment were a filename, losing it from the merged directory
+  # entirely and leaving SYS: pointing one level up, at
+  # `.../tools/build/**/*.*` instead of
+  # `.../tools/build/ecl/**/*.*`. Confirmed directly (not guessed) with
+  # a real Windows CI run: a diagnostic `ecl.exe -eval` probe showed
+  # exactly that -- (si::get-library-pathname) itself correct and even
+  # probe-file-able, but the live "SYS" pathname-translations one
+  # directory short, and (probe-file "SYS:cmp.fas") NIL as a direct
+  # result. (This is also why setting ECLDIR at all, alone, doesn't
+  # explain the original failure: the trailing slash is the whole
+  # story here, not cl_probe_file() failing outright as first
+  # hypothesized -- that turned out to succeed fine.) Fixed with a
+  # trailing slash on the value we hand ECLDIR, restoring the
+  # directory-pathname invariant the self-location path gets for free.
+  ECL_PREFIX_NATIVE=$(cd "$ECL_PREFIX" && pwd -W)/
+
+  # Confirmed by a second real Windows CI run, this time reproducing
+  # the exact failing context (same cwd, same ECLDIR): the trailing
+  # slash above is correct and sufficient -- an explicit (require
+  # 'cmp) there successfully loads cmp via SYS:cmp.fas and c:build-fasl
+  # becomes fboundp. But every one of Maxima's own build invocations
+  # (embedded in src/Makefile.in, e.g. `(load
+  # "../lisp-utils/defsystem.lisp") ... (funcall (intern
+  # "CREATE-DEPENDENCY-FILE" :mk) ...)`, eventually loading
+  # maxima.system) never calls (require 'cmp) itself -- maxima.system's
+  # own `#+ecl (defun do-compile-ecl ... (c:build-fasl ...))` just
+  # assumes cmp is already loaded/resident by the time it's *read*
+  # (`#+ecl` still has to read the form to skip past it correctly, even
+  # were the feature test to fail, which it doesn't -- so reading
+  # `c:build-fasl` happens unconditionally). That assumption evidently
+  # holds on Unix (this exact maxima.system loads fine there) but not
+  # here; not run further to ground why cmp ends up already resident
+  # by this point on Unix and not on Windows, since the fix is the same
+  # regardless: make sure it's required before maxima.system can be
+  # loaded, on any platform. Patches lisp-utils/defsystem.lisp -- the
+  # one file already `(load ...)`-ed first, unconditionally, by every
+  # one of these invocations -- to (require 'cmp) at the very top,
+  # rather than touching Maxima's own Makefile-embedded Lisp forms.
+  DEFSYSTEM_LISP="$SRC_DIR/maxima-$MAXIMA_VERSION/lisp-utils/defsystem.lisp"
+  if ! grep -q 'maxima-r-mingw-require-cmp' "$DEFSYSTEM_LISP"; then
+    log "patching lisp-utils/defsystem.lisp to require cmp up front"
+    printf '%s\n' "#+ecl (require 'cmp) ; maxima-r-mingw-require-cmp: see configure.win" \
+      | cat - "$DEFSYSTEM_LISP" > "$DEFSYSTEM_LISP.tmp"
+    mv "$DEFSYSTEM_LISP.tmp" "$DEFSYSTEM_LISP"
+  fi
+
+  # src/server.lisp installs a SIGPIPE handler bare-guarded by `#+ecl`
+  # alone -- no Windows exclusion at all in the actual 5.46.0 release
+  # tarball (git's current master has grown a `(not windows)` guard
+  # since, itself still wrong for this vendored mingw-w64 build -- see
+  # below -- so don't be misled by checking there instead of the real
+  # tarball). Every ECL build reads this form unconditionally, so on
+  # Windows the reader chokes trying to read EXT:+SIGPIPE+ -- a symbol
+  # that isn't external in EXT here, since SIGPIPE doesn't exist on
+  # Windows: "Cannot find the external symbol +SIGPIPE+ in
+  # #<\"EXT\" package>." (seen verbatim in a real Windows CI run, while
+  # loading maxima.system to generate the dependency file, well before
+  # any of Maxima's own source is actually compiled). Even the `(not
+  # windows)` guard upstream has since added wouldn't fix this build:
+  # ECL's own src/lsp/config.lsp.in tests `(not windows) (not
+  # mingw32)` together, since a mingw32 host carries :mingw32 in
+  # *features*, not :windows -- so `(not windows)` alone is still true
+  # here. Patch the guard to require both `(not windows)` and `(not
+  # mingw32)`, matching ECL's own convention.
+  SERVER_LISP="$SRC_DIR/maxima-$MAXIMA_VERSION/src/server.lisp"
+  if ! grep -q 'maxima-r-mingw-no-sigpipe' "$SERVER_LISP"; then
+    log "patching src/server.lisp: SIGPIPE handler must not run on mingw32"
+    sed -f - "$SERVER_LISP" > "$SERVER_LISP.tmp" <<'SED_EOF'
+s/^    #+ecl (ext:set-signal-handler EXT:+SIGPIPE+ 'ext:quit)$/    #+(and ecl (not windows) (not mingw32)) (ext:set-signal-handler EXT:+SIGPIPE+ 'ext:quit) ; maxima-r-mingw-no-sigpipe: see configure.win/
+SED_EOF
+    mv "$SERVER_LISP.tmp" "$SERVER_LISP"
+    if ! grep -q 'maxima-r-mingw-no-sigpipe' "$SERVER_LISP"; then
+      log "ERROR: failed to patch src/server.lisp's SIGPIPE guard for mingw32"
+      log "  (MAXIMA_VERSION may have changed the code this patch targets)"
+      exit 1
+    fi
+  fi
+
   log "configuring Maxima against the vendored ECL"
   (
     cd "$SRC_DIR/maxima-$MAXIMA_VERSION"
     # Same --build/--host fix as ECL's own configure above: Maxima's
     # configure has its own mingw-specific branch that the same
     # config.guess misdetection would otherwise skip.
-    PATH="$ECL_PREFIX/bin:$PATH" \
+    PATH="$ECL_BINDIR:$PATH" ECLDIR="$ECL_PREFIX_NATIVE" \
       ./configure --prefix="$MAXIMA_PREFIX" --enable-ecl --with-ecl="$ECL_BIN" \
         --build=x86_64-w64-mingw32 --host=x86_64-w64-mingw32 \
         --disable-build-docs
     log "building Maxima (this is the long step -- compiles Maxima's full"
     log "  Lisp source tree via ECL, expect this to take a while)"
-    PATH="$ECL_PREFIX/bin:$PATH" make -j"$(ncpus)"
-    PATH="$ECL_PREFIX/bin:$PATH" make install
+    PATH="$ECL_BINDIR:$PATH" ECLDIR="$ECL_PREFIX_NATIVE" make -j"$(ncpus)"
+    PATH="$ECL_BINDIR:$PATH" ECLDIR="$ECL_PREFIX_NATIVE" make install
   )
   touch "$MAXIMA_STAMP"
 fi
@@ -343,26 +740,38 @@ rm -f "$PKG_ROOT"/src/libecl*.dll
 # file banner above and inst/NOTES.md) -- deliberately not copied into
 # inst/libs/ the way ./configure does on Unix.
 #
-# mingw/libtool convention puts the runtime DLL in <prefix>/bin/ (checked
-# first), falling back to $ECL_LIBDIR in case that doesn't hold for a
-# system ECL.
+# A normal (hierarchical) install puts the runtime DLL in <prefix>/bin/
+# (checked first, e.g. for a system ECL -- MSYS2 packages do follow
+# libtool's usual "lib<name>.dll" naming); flatinstall (hardcoded for
+# mingw*, see the ECL_BIN comment above and inst/NOTES.md) drops it
+# directly in $ECL_PREFIX == $ECL_LIBDIR instead, *without* a "lib"
+# prefix -- confirmed by a real Windows CI run, the vendored build's
+# installed file is plainly named "ecl.dll" (see its link command:
+# `... -o .../build/bin/ecl.exe ... ecl.dll ...`), not "libecl*.dll".
+# Both patterns are tried against $ECL_LIBDIR for exactly that reason.
 copied_libecl=false
-for f in "$ECL_PREFIX"/bin/libecl*.dll "$ECL_LIBDIR"/libecl*.dll; do
+for f in "$ECL_PREFIX"/bin/libecl*.dll "$ECL_LIBDIR"/libecl*.dll "$ECL_LIBDIR"/ecl*.dll; do
   if [ -e "$f" ]; then
     cp "$f" "$PKG_ROOT/src/"
     copied_libecl=true
   fi
 done
 if [ "$copied_libecl" != "true" ]; then
-  log "ERROR: no libecl runtime DLL (libecl*.dll) found under"
+  log "ERROR: no ECL runtime DLL (libecl*.dll / ecl*.dll) found under"
   log "  $ECL_PREFIX/bin or $ECL_LIBDIR"
   exit 1
 fi
 
 # ECL's own Lisp support files, relocated via ECLDIR (see R/boot.R) --
-# same as ./configure.
-ECL_SUPPORT_SRCDIR=$(find "$ECL_LIBDIR" -maxdepth 1 -type d -name 'ecl-*')
-cp -R "$ECL_SUPPORT_SRCDIR"/. "$INST_ECL_SUPPORT_DIR/"
+# same idea as ./configure, but a normal (hierarchical) install's
+# isolated lib/ecl-VERSION/ subdirectory (found below, e.g. for a
+# system ECL) doesn't exist under flatinstall (hardcoded for mingw*,
+# see the ECL_BIN comment above and inst/NOTES.md): ECL_LIBDIR (==
+# $ECL_PREFIX for the vendored build) *is* that content already, mixed
+# in with the exe/DLL/headers, so fall back to copying it wholesale --
+# an empty `find` match would otherwise silently make this `cp -R /.`.
+ECL_SUPPORT_SRCDIR=$(find "$ECL_LIBDIR" -maxdepth 1 -type d -name 'ecl-*' 2>/dev/null | head -n1)
+cp -R "${ECL_SUPPORT_SRCDIR:-$ECL_LIBDIR}"/. "$INST_ECL_SUPPORT_DIR/"
 
 # The full Maxima install tree, relocated via MAXIMA_PREFIX -- same as
 # ./configure; internal layout (maxima.exe rather than a bare `maxima`)
@@ -388,11 +797,84 @@ log "generating src/Makevars.win"
 ECL_CFLAGS=$("$ECL_CONFIG" --cflags)
 ECL_LIBS=$("$ECL_CONFIG" --libs)
 
+# ecl-config (src/util/ecl-config.in) bakes @includedir@/@libdir@ into
+# itself verbatim from whatever --prefix ECL's own ./configure was given
+# -- $ECL_PREFIX above, the plain MSYS-style path `pwd` gives (e.g.
+# "/d/a/maxima/...", not the Windows-native "D:/a/maxima/..." ECLDIR
+# needed -- see the trailing-slash comment near ECL_PREFIX_NATIVE).
+# PKG_CPPFLAGS/PKG_LIBS below feed g++ invoked directly by R's own
+# toolchain (not through this MSYS sh), which doesn't understand that: a
+# leading "/" is just the root of whatever the current drive happens to
+# be, not a drive letter of its own. Confirmed by a real Windows CI run:
+# g++ compiling this package's own src/*.cpp against that -I flag failed
+# outright, "ecl/ecl.h: No such file or directory" -- this is downstream
+# of (and unrelated to) both patches above; those got Maxima itself
+# built, this is R CMD INSTALL's own separate build of this package's
+# C++ glue code against it. Rewrite the one prefix ecl-config would have
+# embedded to its Windows-native form -- literal substring replacement
+# (awk index()/substr(), not sed/regex) since $ECL_PREFIX is a real
+# filesystem path here, not a pattern, and may contain characters a
+# regex would treat specially.
+ECL_PREFIX_NATIVE_NOSLASH=$(cd "$ECL_PREFIX" && pwd -W)
+literal_replace() {
+  awk -v find="$2" -v repl="$3" '
+    { s = $0; out = ""
+      while ((i = index(s, find)) > 0) {
+        out = out substr(s, 1, i - 1) repl
+        s = substr(s, i + length(find))
+      }
+      print out s
+    }' <<EOF2
+$1
+EOF2
+}
+if [ "$USE_SYSTEM_ECL" = "true" ]; then
+  # A real hierarchical install (e.g. pacman's mingw-w64-x86_64-ecl):
+  # $ECL_PREFIX/include and $ECL_PREFIX/lib, what ecl-config's
+  # @includedir@/@libdir@ already point at, genuinely exist. Only the
+  # path *format* needs fixing here.
+  ECL_CFLAGS=$(literal_replace "$ECL_CFLAGS" "$ECL_PREFIX" "$ECL_PREFIX_NATIVE_NOSLASH")
+  ECL_LIBS=$(literal_replace "$ECL_LIBS" "$ECL_PREFIX" "$ECL_PREFIX_NATIVE_NOSLASH")
+else
+  # The vendored build was installed via ECL's own "flatinstall" target
+  # (src/Makefile.in: `flatinstall: ... $(MAKE) bindir=$(prefix)
+  # libdir=$(prefix) includedir=$(prefix) ecldir=$(prefix) install`,
+  # confirmed by reading it directly, not inferred from ecl-config) --
+  # every header and library lands directly under $ECL_PREFIX itself
+  # (headers at $ECL_PREFIX/ecl/*.h specifically, per that same
+  # Makefile.in's `install:` target), not under an .../include or
+  # .../lib subdirectory at all. ecl-config's @includedir@/@libdir@
+  # don't know that: they're baked in from autoconf's own
+  # --includedir/--libdir *defaults* ("${prefix}/include",
+  # "${prefix}/lib"), which is what a normal (non-flat) install would
+  # have used -- flatinstall's prefix= overrides at the Makefile level
+  # never flow back into the separately-generated ecl-config script.
+  # Confirmed by a real Windows CI run: even after the previous fix
+  # rewrote the path to Windows-native form, g++ still failed on it --
+  # "ecl/ecl.h: No such file or directory" -- because .../ecl/include
+  # is never created under flatinstall in the first place; the wrong
+  # part was the "/include" (and "/lib") path *component*, not just its
+  # format. Strip that wrong component in the same substitution that
+  # fixes the format, then run the general prefix fix too in case
+  # ecl-config emitted $ECL_PREFIX anywhere else unchanged.
+  ECL_CFLAGS=$(literal_replace "$ECL_CFLAGS" "$ECL_PREFIX/include" "$ECL_PREFIX_NATIVE_NOSLASH")
+  ECL_LIBS=$(literal_replace "$ECL_LIBS" "$ECL_PREFIX/lib" "$ECL_PREFIX_NATIVE_NOSLASH")
+  ECL_CFLAGS=$(literal_replace "$ECL_CFLAGS" "$ECL_PREFIX" "$ECL_PREFIX_NATIVE_NOSLASH")
+  ECL_LIBS=$(literal_replace "$ECL_LIBS" "$ECL_PREFIX" "$ECL_PREFIX_NATIVE_NOSLASH")
+fi
+
 cat > "$PKG_ROOT/src/Makevars.win" <<EOF
 # Generated by configure.win -- do not edit by hand.
 PKG_CPPFLAGS = $ECL_CFLAGS
 PKG_LIBS = $ECL_LIBS
-CXX_STD = CXX11
+CXX_STD = CXX14
+# See ./configure's matching comment: CXX_STD alone isn't a reliable way
+# to pin the dialect on every R toolchain, and ECL's public headers use
+# the pre-C++17 \`register\` keyword, a hard error once C++17 or later is
+# in effect (Clang; MinGW's g++ only warns, but pin it here too rather
+# than depend on that). -std=gnu++14 keeps \`register\` merely deprecated
+# everywhere, while still satisfying cpp11's C++11 floor.
+PKG_CXXFLAGS = -std=gnu++14
 EOF
 
 log "configure.win done."

@@ -5,7 +5,8 @@
 // call, built and evaluated by Layer C (maxima_call.cpp) via meval.
 #pragma once
 
-// cpp11.hpp before ecl/ecl.h -- see the ordering note in mx_handle.h.
+// cpp11.hpp before ecl/ecl.h -- see ecl_pthread_fix.h.
+#include "ecl_pthread_fix.h"
 #include <cpp11.hpp>
 #include <ecl/ecl.h>
 #undef CAR
