@@ -412,6 +412,41 @@ SED_EOF
       fi
     fi
 
+    # ECL's src/h/impl/math_fenv.h includes math_fenv_msvc.h -- a shim
+    # providing fenv_t/fesetenv/etc as macros, written for real MSVC,
+    # which historically lacked working C99 fenv.h support -- whenever
+    # ECL_MS_WINDOWS_HOST is defined, with no check for whether this is
+    # actually MSVC at all. It isn't, here: mingw-w64's CRT has a
+    # perfectly good <fenv.h> (confirmed via a real Windows CI run's own
+    # "checking for fenv.h... yes"), which math_fenv.h already includes
+    # correctly first -- so on mingw this shim loads *in addition*,
+    # right after, and promptly `#define fenv_t int`, silently
+    # rewriting every subsequent use of the token `fenv_t` (including
+    # ones inside libstdc++'s own <cfenv>, pulled in later by this
+    # package's own ecl_embed.cpp) to the literal text "int". Confirmed
+    # by a real Windows CI run: <cfenv>'s own declarations come out
+    # mangled ("expected ';' before 'int'"), and ecl_embed.cpp's
+    # std::fesetenv(FE_DFL_ENV) calls no longer typecheck against the
+    # real fesetenv() mingw's <fenv.h> declared moments before. Same
+    # class of bug as the SIGPIPE and pthread_t ones above: an ECL
+    # Windows-specific code path that assumes Windows == MSVC. Patches
+    # math_fenv.h's guard to also require _MSC_VER, so mingw builds rely
+    # solely on the real <fenv.h> already working for them.
+    MATH_FENV_H="$SRC_DIR/ecl-$ECL_VERSION/src/h/impl/math_fenv.h"
+    if ! grep -q 'maxima-r-mingw-no-msvc-fenv-shim' "$MATH_FENV_H"; then
+      log "patching ECL's math_fenv.h: the MSVC fenv shim must not load on mingw32"
+      sed -f - "$MATH_FENV_H" > "$MATH_FENV_H.tmp" <<'SED_EOF'
+s/^#if defined(ECL_MS_WINDOWS_HOST)$/#if defined(ECL_MS_WINDOWS_HOST) \&\& defined(_MSC_VER) \/* maxima-r-mingw-no-msvc-fenv-shim: see configure.win *\//
+SED_EOF
+      chmod +x "$MATH_FENV_H.tmp"
+      mv "$MATH_FENV_H.tmp" "$MATH_FENV_H"
+      if ! grep -q 'maxima-r-mingw-no-msvc-fenv-shim' "$MATH_FENV_H"; then
+        log "ERROR: failed to patch ECL's math_fenv.h to skip the MSVC shim on mingw32"
+        log "  (ECL_VERSION may have changed the code this patch targets)"
+        exit 1
+      fi
+    fi
+
     # ECL's cmp:linker-cc (src/cmp/cmpmain.lsp) hands the linker driver
     # (*ld*, normally the same gcc used to compile) one argument per
     # object file being linked -- and per cmp:guess-ld-flags, *every*
