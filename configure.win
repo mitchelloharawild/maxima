@@ -354,36 +354,59 @@ SED_EOF
       fi
     fi
 
-    # ECL's configure hardcodes enable_threads='yes' in its own `mingw*)`
-    # host_os case branch (src/aclocal.m4, the same case block that also
-    # hardcodes with_fpe=no and INSTALL_TARGET=flatinstall -- both
-    # already worked around elsewhere in this script) -- so the
-    # --enable-threads=no passed on the command line below is silently
-    # overridden right back to "yes" for any mingw* host, regardless.
-    # With threads on, ECL's own ecl/ecl.h declares its own
-    # pthread_t/pthread_mutex_t/pthread_cond_t (as bare HANDLE) whenever
-    # ECL_MS_WINDOWS_HOST + ECL_THREADS are both defined, which conflicts
-    # outright with winpthreads' real (unconditional, unguarded)
-    # typedefs of the same names once this package's own C++ sources
-    # pull in <pthread.h> transitively in the same translation unit
-    # (cpp11.hpp -> <memory> -> libstdc++'s bits/gthr-default.h, since
-    # Rtools' g++ is the "posix" thread-model variant) -- confirmed by a
-    # real Windows CI run to still happen with --enable-threads=no on
-    # the command line, and confirmed against ECL's own source (not
-    # guessed) that this exact line is why. See inst/NOTES.md's "ECL
-    # threads on mingw-w64" entry for why disabling threads is safe here
-    # (neither ecl_embed.cpp nor maxima_call.cpp use ECL's own thread
-    # support). Patches the override out; --enable-threads=no on the
-    # command line then actually takes effect.
-    if ! grep -q 'maxima-r-mingw-no-threads' "$ECL_CONFIGURE_SRC"; then
-      log "patching ECL's configure: mingw* must not force threads back on"
-      sed -f - "$ECL_CONFIGURE_SRC" > "$ECL_CONFIGURE_SRC.tmp" <<'SED_EOF'
-s/^                enable_threads='yes'$/                enable_threads='no' # maxima-r-mingw-no-threads: see configure.win/
+    # ECL's own ecl/ecl.h declares pthread_t/pthread_mutex_t/
+    # pthread_cond_t itself (as bare HANDLE) whenever ECL_MS_WINDOWS_HOST
+    # + ECL_THREADS are both defined -- and ECL_THREADS can't be turned
+    # off to dodge that: ecl.h itself #errors "The Windows ports cannot
+    # be built without threads" if it isn't defined (confirmed the hard
+    # way -- a prior version of this patch tried --enable-threads=no,
+    # which turned out to be silently overridden by ECL's own configure
+    # regardless; patching *that* override out in turn just traded one
+    # real Windows CI failure for this #error, hit on the very next run).
+    # So threads must stay on, and this conflicts outright with
+    # winpthreads' real (unconditional, unguarded) typedefs of the same
+    # three names once this package's own C++ sources pull in
+    # <pthread.h> transitively in the same translation unit (cpp11.hpp
+    # -> <memory> -> libstdc++'s bits/gthr-default.h, since Rtools' g++
+    # is the "posix" thread-model variant) -- confirmed by a real
+    # Windows CI run: "conflicting declaration 'typedef void*
+    # pthread_t'" etc. against winpthreads' pthread.h.
+    #
+    # Neither header's typedefs are guarded against the other -- but
+    # winpthreads' pthread.h does have its own top-of-file include guard
+    # (WIN_PTHREADS_H, checked directly against its actual source, not
+    # guessed), defined once real pthread.h has been read at all. Since
+    # this package's own convert.h/mx_handle.h already include cpp11.hpp
+    # (and so, transitively, real pthread.h) before ecl/ecl.h -- an
+    # existing, deliberate ordering, see the comment in convert.h --
+    # WIN_PTHREADS_H is reliably already defined by the time ecl.h's own
+    # typedefs would run in exactly the files that need both headers.
+    # Skip ecl.h's own typedefs in that case: harmless, since ECL's own
+    # C build (pure C, no C++, no <memory>) never sees a real pthread.h
+    # and keeps declaring pthread_t as HANDLE as before, exactly as its
+    # own Win32-based thread implementation (built entirely separately,
+    # before this package's own C++ sources are ever compiled) needs;
+    # this package's own C++ code, on the other hand, never touches
+    # pthread_t/pthread_mutex_t/pthread_cond_t itself (checked directly
+    # -- grepped ecl_embed.cpp/maxima_call.cpp/convert.cpp), so it
+    # doesn't matter to it which of the two types it ends up seeing.
+    ECL_H="$SRC_DIR/ecl-$ECL_VERSION/src/h/ecl.h"
+    if ! grep -q 'maxima-r-mingw-pthread-guard' "$ECL_H"; then
+      log "patching ECL's ecl.h: skip its pthread_t et al if winpthreads' are"
+      log "  already in scope"
+      sed -f - "$ECL_H" > "$ECL_H.tmp" <<'SED_EOF'
+/^# ifdef ECL_THREADS$/,/^   typedef HANDLE pthread_cond_t; \/\*Dummy, not really used\*\/$/c\
+# ifdef ECL_THREADS\
+#  ifndef WIN_PTHREADS_H /* maxima-r-mingw-pthread-guard: see configure.win */\
+   typedef HANDLE pthread_t;\
+   typedef HANDLE pthread_mutex_t;\
+   typedef HANDLE pthread_cond_t; /*Dummy, not really used*/\
+#  endif
 SED_EOF
-      chmod +x "$ECL_CONFIGURE_SRC.tmp"
-      mv "$ECL_CONFIGURE_SRC.tmp" "$ECL_CONFIGURE_SRC"
-      if ! grep -q 'maxima-r-mingw-no-threads' "$ECL_CONFIGURE_SRC"; then
-        log "ERROR: failed to patch ECL's configure to stop forcing threads on for mingw32"
+      chmod +x "$ECL_H.tmp"
+      mv "$ECL_H.tmp" "$ECL_H"
+      if ! grep -q 'maxima-r-mingw-pthread-guard' "$ECL_H"; then
+        log "ERROR: failed to patch ECL's ecl.h to guard its pthread_t et al"
         log "  (ECL_VERSION may have changed the code this patch targets)"
         exit 1
       fi
@@ -499,28 +522,11 @@ SED_EOF
       # diagnostic and not yet confirmed to be hit, but pre-emptively
       # relaxed here too rather than spending another CI round-trip on
       # what upstream's own release notes list alongside int-conversion.
-      # --enable-threads=no, unlike the Unix build (./configure still
-      # uses "yes" there, unchanged): with threads on, ECL's own
-      # ecl/ecl.h declares pthread_t/pthread_mutex_t/pthread_cond_t
-      # itself (as bare HANDLE) whenever ECL_MS_WINDOWS_HOST +
-      # ECL_THREADS are both defined -- fine standalone, but this
-      # package's own C++ sources also pull in <pthread.h> transitively
-      # (cpp11.hpp -> <memory> -> libstdc++'s bits/gthr-default.h, since
-      # Rtools' g++ here is the "posix" thread-model variant, i.e. real
-      # winpthreads-backed) in the same translation unit, and ECL's
-      # typedefs conflict outright with winpthreads' real ones (`HANDLE`
-      # vs `uintptr_t`/`intptr_t`) -- confirmed by a real Windows CI run:
-      # "conflicting declaration 'typedef void* pthread_t'" etc. against
-      # winpthreads' pthread.h, for exactly those three types. Neither
-      # header guards against the other already having declared these
-      # (winpthreads' typedefs are unconditional), so no include-order
-      # fix is possible -- and this exact tradeoff (and the need to
-      # audit for anything relying on it first) is already anticipated
-      # in inst/NOTES.md's "ECL threads on mingw-w64" entry. Audited:
-      # neither ecl_embed.cpp nor maxima_call.cpp (the only consumers of
-      # ECL's own C API here) reference any pthread/mp: symbol, so there
-      # is nothing here relying on ECL's own thread support.
-      ./configure --prefix="$ECL_PREFIX" --enable-threads=no \
+      # --enable-threads=yes, same as Unix: ECL's Windows port hard-
+      # requires this (ecl/ecl.h #errors otherwise) -- see the pthread.h
+      # conflict this causes, and how it's actually resolved instead,
+      # in the ecl.h patch above.
+      ./configure --prefix="$ECL_PREFIX" --enable-threads=yes \
         --build=x86_64-w64-mingw32 --host=x86_64-w64-mingw32 \
         --enable-gmp=included --enable-boehm=included --with-dffi=included \
         --with-fpe=no \

@@ -154,30 +154,41 @@ likely each is to be the actual problem:
   "Writing R Extensions", and (b) that the DLL actually landed in `src/`
   before `R CMD INSTALL`'s Windows packaging step ran (i.e. that
   configure.win's runtime-staging step ran before that point, not after).
-* **ECL threads on mingw-w64.** Built with `--enable-threads=no`,
-  unlike Unix (still `yes` there). Confirmed by a real Windows CI run:
-  with threads on, ECL's own ecl/ecl.h declares
+* **ECL threads on mingw-w64.** Built with `--enable-threads=yes`, same
+  as Unix -- ECL's Windows port hard-requires this (its own ecl/ecl.h
+  `#error`s "The Windows ports cannot be built without threads" if
+  ECL_THREADS isn't defined), confirmed the hard way: an earlier attempt
+  to build with threads off instead (to dodge the pthread.h conflict
+  below) turned out to need patching around a *second* problem first --
+  ECL's own `src/configure` hardcodes `enable_threads='yes'` in its
+  `mingw*)` host_os case branch, silently overriding `--enable-threads=
+  no` on the command line -- and patching that override out in turn
+  just traded one real Windows CI failure for this `#error` on the very
+  next run. Threads have to stay on.
+  With threads on, ECL's own ecl/ecl.h declares
   pthread_t/pthread_mutex_t/pthread_cond_t itself (as bare HANDLE)
   whenever ECL_MS_WINDOWS_HOST + ECL_THREADS are both defined, which
   conflicts outright with winpthreads' real (unconditional, unguarded)
   typedefs of the same names once this package's own C++ sources pull
   in `<pthread.h>` transitively (cpp11.hpp -> `<memory>` -> libstdc++'s
   bits/gthr-default.h, since Rtools' g++ is the "posix" thread-model
-  variant) in the same translation unit -- no include-order fix is
-  possible, since neither header guards against the other having
-  already declared these. Audited first, per the note this replaced:
-  neither `ecl_embed.cpp` nor `maxima_call.cpp` reference any
-  pthread/mp: symbol, so nothing here relies on ECL's own thread
-  support. `--enable-threads=no` alone isn't sufficient, though: ECL's
-  own `src/configure` hardcodes `enable_threads='yes'` in its `mingw*)`
-  host_os case branch (the same case block that also hardcodes
-  `with_fpe=no` and `INSTALL_TARGET=flatinstall`, both already worked
-  around elsewhere in configure.win), silently overriding the
-  command-line flag back to "yes" for any mingw* host regardless --
-  confirmed directly against ECL's own source, not guessed, after the
-  flag alone provably didn't change the build's behavior on a real
-  Windows CI run. configure.win patches that line out the same way it
-  already patches the other two hardcoded overrides in that block.
+  variant) in the same translation unit -- confirmed by a real Windows
+  CI run: "conflicting declaration 'typedef void* pthread_t'" etc.
+  Resolved instead by patching ecl.h itself: winpthreads' pthread.h has
+  its own top-of-file include guard (`WIN_PTHREADS_H`, checked directly
+  against its actual source), already defined by the time ecl.h's own
+  typedefs would run in convert.h/mx_handle.h specifically, since those
+  already include cpp11.hpp (and so, transitively, real pthread.h)
+  before ecl/ecl.h -- an existing, deliberate ordering (see the comment
+  in convert.h). configure.win wraps ecl.h's own three typedefs in
+  `#ifndef WIN_PTHREADS_H`, so they're skipped whenever real pthread.h
+  is already in scope. Harmless either way: ECL's own C build (pure C,
+  no C++, no `<memory>`) never sees a real pthread.h and keeps declaring
+  pthread_t as HANDLE exactly as its own Win32-based thread
+  implementation needs, and this package's own C++ code never touches
+  pthread_t/pthread_mutex_t/pthread_cond_t itself (checked directly --
+  grepped ecl_embed.cpp/maxima_call.cpp/convert.cpp), so it doesn't
+  matter to it which of the two types it ends up seeing.
 * **`--with-fpe=no`.** Carried over unchanged from the Unix build for
   the same reason noted above under "Signal handlers and floating
   point", but that reasoning was worked out against POSIX SIGFPE
