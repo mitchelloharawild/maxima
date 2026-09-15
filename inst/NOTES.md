@@ -154,12 +154,21 @@ likely each is to be the actual problem:
   "Writing R Extensions", and (b) that the DLL actually landed in `src/`
   before `R CMD INSTALL`'s Windows packaging step ran (i.e. that
   configure.win's runtime-staging step ran before that point, not after).
-* **ECL threads on mingw-w64.** Built with `--enable-threads=yes`, same
-  as Unix. If ECL's own configure/build has rough edges here on Windows,
-  the first thing to try is dropping to `--enable-threads=no` (which
-  would also need auditing anything in `ecl_embed.cpp`/`maxima_call.cpp`
-  that assumes threading support) rather than assuming it's unrelated
-  breakage elsewhere.
+* **ECL threads on mingw-w64.** Built with `--enable-threads=no`,
+  unlike Unix (still `yes` there). Confirmed by a real Windows CI run:
+  with threads on, ECL's own ecl/ecl.h declares
+  pthread_t/pthread_mutex_t/pthread_cond_t itself (as bare HANDLE)
+  whenever ECL_MS_WINDOWS_HOST + ECL_THREADS are both defined, which
+  conflicts outright with winpthreads' real (unconditional, unguarded)
+  typedefs of the same names once this package's own C++ sources pull
+  in `<pthread.h>` transitively (cpp11.hpp -> `<memory>` -> libstdc++'s
+  bits/gthr-default.h, since Rtools' g++ is the "posix" thread-model
+  variant) in the same translation unit -- no include-order fix is
+  possible, since neither header guards against the other having
+  already declared these. Audited first, per the note this replaced:
+  neither `ecl_embed.cpp` nor `maxima_call.cpp` reference any
+  pthread/mp: symbol, so nothing here relies on ECL's own thread
+  support.
 * **`--with-fpe=no`.** Carried over unchanged from the Unix build for
   the same reason noted above under "Signal handlers and floating
   point", but that reasoning was worked out against POSIX SIGFPE

@@ -464,7 +464,28 @@ SED_EOF
       # diagnostic and not yet confirmed to be hit, but pre-emptively
       # relaxed here too rather than spending another CI round-trip on
       # what upstream's own release notes list alongside int-conversion.
-      ./configure --prefix="$ECL_PREFIX" --enable-threads=yes \
+      # --enable-threads=no, unlike the Unix build (./configure still
+      # uses "yes" there, unchanged): with threads on, ECL's own
+      # ecl/ecl.h declares pthread_t/pthread_mutex_t/pthread_cond_t
+      # itself (as bare HANDLE) whenever ECL_MS_WINDOWS_HOST +
+      # ECL_THREADS are both defined -- fine standalone, but this
+      # package's own C++ sources also pull in <pthread.h> transitively
+      # (cpp11.hpp -> <memory> -> libstdc++'s bits/gthr-default.h, since
+      # Rtools' g++ here is the "posix" thread-model variant, i.e. real
+      # winpthreads-backed) in the same translation unit, and ECL's
+      # typedefs conflict outright with winpthreads' real ones (`HANDLE`
+      # vs `uintptr_t`/`intptr_t`) -- confirmed by a real Windows CI run:
+      # "conflicting declaration 'typedef void* pthread_t'" etc. against
+      # winpthreads' pthread.h, for exactly those three types. Neither
+      # header guards against the other already having declared these
+      # (winpthreads' typedefs are unconditional), so no include-order
+      # fix is possible -- and this exact tradeoff (and the need to
+      # audit for anything relying on it first) is already anticipated
+      # in inst/NOTES.md's "ECL threads on mingw-w64" entry. Audited:
+      # neither ecl_embed.cpp nor maxima_call.cpp (the only consumers of
+      # ECL's own C API here) reference any pthread/mp: symbol, so there
+      # is nothing here relying on ECL's own thread support.
+      ./configure --prefix="$ECL_PREFIX" --enable-threads=no \
         --build=x86_64-w64-mingw32 --host=x86_64-w64-mingw32 \
         --enable-gmp=included --enable-boehm=included --with-dffi=included \
         --with-fpe=no \
