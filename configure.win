@@ -354,6 +354,41 @@ SED_EOF
       fi
     fi
 
+    # ECL's configure hardcodes enable_threads='yes' in its own `mingw*)`
+    # host_os case branch (src/aclocal.m4, the same case block that also
+    # hardcodes with_fpe=no and INSTALL_TARGET=flatinstall -- both
+    # already worked around elsewhere in this script) -- so the
+    # --enable-threads=no passed on the command line below is silently
+    # overridden right back to "yes" for any mingw* host, regardless.
+    # With threads on, ECL's own ecl/ecl.h declares its own
+    # pthread_t/pthread_mutex_t/pthread_cond_t (as bare HANDLE) whenever
+    # ECL_MS_WINDOWS_HOST + ECL_THREADS are both defined, which conflicts
+    # outright with winpthreads' real (unconditional, unguarded)
+    # typedefs of the same names once this package's own C++ sources
+    # pull in <pthread.h> transitively in the same translation unit
+    # (cpp11.hpp -> <memory> -> libstdc++'s bits/gthr-default.h, since
+    # Rtools' g++ is the "posix" thread-model variant) -- confirmed by a
+    # real Windows CI run to still happen with --enable-threads=no on
+    # the command line, and confirmed against ECL's own source (not
+    # guessed) that this exact line is why. See inst/NOTES.md's "ECL
+    # threads on mingw-w64" entry for why disabling threads is safe here
+    # (neither ecl_embed.cpp nor maxima_call.cpp use ECL's own thread
+    # support). Patches the override out; --enable-threads=no on the
+    # command line then actually takes effect.
+    if ! grep -q 'maxima-r-mingw-no-threads' "$ECL_CONFIGURE_SRC"; then
+      log "patching ECL's configure: mingw* must not force threads back on"
+      sed -f - "$ECL_CONFIGURE_SRC" > "$ECL_CONFIGURE_SRC.tmp" <<'SED_EOF'
+s/^                enable_threads='yes'$/                enable_threads='no' # maxima-r-mingw-no-threads: see configure.win/
+SED_EOF
+      chmod +x "$ECL_CONFIGURE_SRC.tmp"
+      mv "$ECL_CONFIGURE_SRC.tmp" "$ECL_CONFIGURE_SRC"
+      if ! grep -q 'maxima-r-mingw-no-threads' "$ECL_CONFIGURE_SRC"; then
+        log "ERROR: failed to patch ECL's configure to stop forcing threads on for mingw32"
+        log "  (ECL_VERSION may have changed the code this patch targets)"
+        exit 1
+      fi
+    fi
+
     # ECL's cmp:linker-cc (src/cmp/cmpmain.lsp) hands the linker driver
     # (*ld*, normally the same gcc used to compile) one argument per
     # object file being linked -- and per cmp:guess-ld-flags, *every*

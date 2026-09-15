@@ -168,7 +168,16 @@ likely each is to be the actual problem:
   already declared these. Audited first, per the note this replaced:
   neither `ecl_embed.cpp` nor `maxima_call.cpp` reference any
   pthread/mp: symbol, so nothing here relies on ECL's own thread
-  support.
+  support. `--enable-threads=no` alone isn't sufficient, though: ECL's
+  own `src/configure` hardcodes `enable_threads='yes'` in its `mingw*)`
+  host_os case branch (the same case block that also hardcodes
+  `with_fpe=no` and `INSTALL_TARGET=flatinstall`, both already worked
+  around elsewhere in configure.win), silently overriding the
+  command-line flag back to "yes" for any mingw* host regardless --
+  confirmed directly against ECL's own source, not guessed, after the
+  flag alone provably didn't change the build's behavior on a real
+  Windows CI run. configure.win patches that line out the same way it
+  already patches the other two hardcoded overrides in that block.
 * **`--with-fpe=no`.** Carried over unchanged from the Unix build for
   the same reason noted above under "Signal handlers and floating
   point", but that reasoning was worked out against POSIX SIGFPE
