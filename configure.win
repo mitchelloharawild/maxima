@@ -354,6 +354,67 @@ SED_EOF
       fi
     fi
 
+    # ECL's cmp:linker-cc (src/cmp/cmpmain.lsp) hands the linker driver
+    # (*ld*, normally the same gcc used to compile) one argument per
+    # object file being linked -- and per cmp:guess-ld-flags, *every*
+    # plain .o file being linked is passed this way, not just genuinely
+    # extra flags. Maxima's own link step (c::build-fasl/build-program
+    # in its src/maxima.system, called with :lisp-files bound to all
+    # ~900 of its compiled modules) hands linker-cc all ~900 of their
+    # absolute .o paths, well past Windows' ~32K-character CreateProcess
+    # command-line limit -- confirmed by a real Windows CI run: "Could
+    # not spawn subprocess to run \"x86_64-w64-mingw32-gcc\". ... The
+    # parameter is incorrect." (ERROR_INVALID_PARAMETER), raised from
+    # BUILD-MAXIMA-LIB while building Maxima itself, i.e. this is
+    # unrelated to (and downstream of) the SIGPIPE patch above. GCC and
+    # GNU ld both support reading arguments from an "@file" response
+    # file instead, so patch linker-cc to always route its argument
+    # list through one of those on mingw32 -- sidestepping the command
+    # line length limit regardless of how many files Maxima or any
+    # other package being cross-built here eventually grows to.
+    CMPMAIN_LISP="$SRC_DIR/ecl-$ECL_VERSION/src/cmp/cmpmain.lsp"
+    if ! grep -q 'maxima-r-mingw-link-response-file' "$CMPMAIN_LISP"; then
+      log "patching ECL's cmp:linker-cc to use a response file on mingw32"
+      # Anchored on "(declare (ignore type))", not "#-msvc" above it --
+      # #-msvc alone isn't unique in this file (it also guards
+      # dump-precompiled-header further down), and a sed range restarts
+      # at every match of its start pattern: anchoring there let this
+      # patch's range reopen at that second #-msvc with no closing
+      # match before EOF, silently deleting the rest of the file
+      # (dump-precompiled-header, ext:install-c-compiler, and the
+      # trailing (provide 'cmp)) -- caught by actually loading the
+      # patched file, not just eyeballing the diff. The signature line
+      # two above isn't unique either (the #+msvc linker-cc has the
+      # identical argument list), so this leaves that line and #-msvc
+      # untouched and only replaces the body from here down.
+      sed -f - "$CMPMAIN_LISP" > "$CMPMAIN_LISP.tmp" <<'SED_EOF'
+/^  (declare (ignore type))$/,/^     ,@ld-flags)))$/c\
+  (declare (ignore type))\
+  (let ((args `("-o" ,(brief-namestring o-pathname)\
+                ,(concatenate 'string "-L" (fix-for-mingw (ecl-library-directory)))\
+                ,@object-files\
+                ,@(and *ld-rpath* (list *ld-rpath*))\
+                ,@(split-program-options *user-ld-flags*)\
+                ,@ld-flags))\
+        (rsp nil))\
+    #+mingw32 ; maxima-r-mingw-link-response-file: see configure.win\
+    (when (setf rsp (si::mkstemp #P"TMP:ecl-link-args"))\
+      (with-open-file (s rsp :direction :output :if-exists :supersede)\
+        (dolist (a args) (format s "~S~%" a)))\
+      (setf args (list (concatenate 'string "@" (namestring rsp)))))\
+    (unwind-protect\
+         (safe-run-program *ld* args)\
+      (when rsp (ignore-errors (delete-file rsp))))))
+SED_EOF
+      chmod +x "$CMPMAIN_LISP.tmp"
+      mv "$CMPMAIN_LISP.tmp" "$CMPMAIN_LISP"
+      if ! grep -q 'maxima-r-mingw-link-response-file' "$CMPMAIN_LISP"; then
+        log "ERROR: failed to patch ECL's cmp:linker-cc for a mingw32 response file"
+        log "  (ECL_VERSION may have changed the code this patch targets)"
+        exit 1
+      fi
+    fi
+
     log "configuring ECL for mingw-w64 (this vendors GMP, Boehm-GC and"
     log "  libffi -- no system Lisp, bignum, GC or FFI library is required)"
     (
